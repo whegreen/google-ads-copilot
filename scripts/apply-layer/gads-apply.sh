@@ -22,6 +22,7 @@ LIB_DIR="$SCRIPT_DIR/lib"
 # Load libraries (config.sh loaded transitively via token-refresh.sh)
 source "$LIB_DIR/token-refresh.sh"
 source "$LIB_DIR/parse-draft.sh"
+source "$LIB_DIR/asset-rules.sh"
 source "$LIB_DIR/api-mutate.sh"
 source "$LIB_DIR/api-verify.sh"
 source "$LIB_DIR/audit-write.sh"
@@ -360,6 +361,100 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
     fi
   fi
 
+  # ─── Asset actions (v3) ───
+  # Blast-radius guard: an asset action may only touch an ad group that the
+  # draft names explicitly. The manifest carries adgroup_name; we resolve it
+  # by name (never by a raw id) so a typo cannot hit an unrelated ad group.
+  if [ "$action_type" = "UPDATE_RSA_ASSETS" ]; then
+    if [ -z "$adgroup_name" ]; then
+      echo -e "  ${RED}❌ RSA asset action must name an ad group${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Ad group not named in draft"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    # Which RSA in this ad group? An ad group can hold several.
+    rsa_list=$(lookup_rsa_ads_in_adgroup "$CUSTOMER_ID" "$campaign_name" "$adgroup_name")
+    rsa_count=$(echo "$rsa_list" | jq 'length' 2>/dev/null || echo 0)
+
+    if [ "$rsa_count" -eq 0 ]; then
+      echo -e "  ${RED}❌ No responsive search ad found in \"${adgroup_name}\"${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "No RSA found in ad group"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    if [ "$rsa_count" -gt 1 ]; then
+      echo -e "  ${RED}❌ Ad group \"${adgroup_name}\" has ${rsa_count} RSAs — target one explicitly${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Ad group has multiple RSAs"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    ad_id=$(echo "$rsa_list" | jq -r '.[0].ad_id')
+    ad_group_ad_id=$(echo "$rsa_list" | jq -r '.[0].ad_group_ad_id')
+    echo -e "  ✅ RSA: ${ad_group_ad_id} (ad ${ad_id})"
+
+    # Read the assets already live, then merge. The API replaces the whole
+    # list on update, so we must send the full intended set — never only the
+    # new assets.
+    existing_assets=$(fetch_rsa_assets "$CUSTOMER_ID" "$ad_id")
+    draft_assets=$(jq -n \
+      --argjson h "$(echo "$action" | jq -c '.asset_headlines // []')" \
+      --argjson d "$(echo "$action" | jq -c '.asset_descriptions // []')" \
+      --argjson u "$(echo "$action" | jq -c '.asset_final_urls // []')" \
+      '{headlines: $h, descriptions: $d, final_urls: $u}')
+
+    replace_mode=$(echo "$action" | jq -r '.asset_replace // false')
+    merged_assets=$(asset_merge_lists "$existing_assets" "$draft_assets" "$replace_mode")
+
+    merged_err=$(asset_validate_merged "$merged_assets")
+    if [ -n "$merged_err" ]; then
+      echo -e "  ${RED}❌ Merged asset list invalid: ${merged_err}${NC}"
+      action=$(echo "$action" | jq --arg msg "Merged asset list invalid: $merged_err" '. + {valid: false, error: $msg}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    # Snapshot the pre-change list — this is what undo restores.
+    action=$(echo "$action" | jq \
+      --arg adid "$ad_id" \
+      --arg agadid "$ad_group_ad_id" \
+      --argjson merged "$merged_assets" \
+      --argjson snapshot "$existing_assets" \
+      '. + {
+        ad_id: $adid,
+        ad_group_ad_id: $agadid,
+        merged_headlines: $merged.headlines,
+        merged_descriptions: $merged.descriptions,
+        merged_final_urls: $merged.final_urls,
+        snapshot: $snapshot
+      }')
+
+    live_h=$(echo "$existing_assets" | jq '.headlines | length')
+    live_d=$(echo "$existing_assets" | jq '.descriptions | length')
+    new_h=$(echo "$merged_assets" | jq '.headlines | length')
+    new_d=$(echo "$merged_assets" | jq '.descriptions | length')
+    echo -e "  ✅ Assets: ${live_h}→${new_h} headline(s), ${live_d}→${new_d} description(s)${replace_mode:+ (replace)}"
+  fi
+
+  if [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
+    if [ -z "$adgroup_name" ]; then
+      echo -e "  ${RED}❌ Asset action must name an ad group${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Ad group not named in draft"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    asset_type=$(echo "$action" | jq -r '.asset_type')
+    echo -e "  ✅ Asset type: ${asset_type} → ad group \"${adgroup_name}\""
+  fi
+
   # For ad group pause actions, resolve the ad group ID
   if [ "$action_type" = "PAUSE_ADGROUP" ]; then
     if [ -z "$adgroup_name" ]; then
@@ -383,7 +478,7 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
   fi
 
   case "$action_type" in
-    ADD_NEGATIVE|SET_CAMPAIGN_DAILY_BUDGET|PAUSE_KEYWORD|PAUSE_ADGROUP)
+    ADD_NEGATIVE|SET_CAMPAIGN_DAILY_BUDGET|PAUSE_KEYWORD|PAUSE_ADGROUP|UPDATE_RSA_ASSETS|CREATE_ADGROUP_ASSET)
       ;;
     *)
       echo -e "  ${RED}❌ Unsupported action type: \"${action_type}\"${NC}"
@@ -433,6 +528,17 @@ if [ "$VALID_BUDGET_COUNT" -gt 0 ]; then
       echo -e "${RED}Add meta.budget_policy.allow_net_increase=true only when a bounded net increase is intentional.${NC}"
       exit 1
     fi
+  fi
+fi
+
+# Asset guardrail: total headline+description count across the draft.
+ASSET_ACTION_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET"))] | length')
+if [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
+  count_err=$(asset_validate_draft_count "$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET"))]')")
+  if [ -n "$count_err" ]; then
+    echo ""
+    echo -e "${RED}ERROR: Asset draft exceeds max_assets_per_draft (${count_err}).${NC}"
+    exit 1
   fi
 fi
 
@@ -491,6 +597,19 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       display_target="Campaign: ${campaign}"
       display_detail="${adgroup}"
       ;;
+    UPDATE_RSA_ASSETS)
+      display_type="RSA ASSETS"
+      display_target="AG: ${adgroup}"
+      merged_h=$(echo "$action" | jq '.merged_headlines | length')
+      merged_d=$(echo "$action" | jq '.merged_descriptions | length')
+      display_detail="${merged_h}H/${merged_d}D"
+      display_risk="Medium"
+      ;;
+    CREATE_ADGROUP_ASSET)
+      display_type="AD ASSET"
+      display_target="AG: ${adgroup}"
+      display_detail=$(echo "$action" | jq -r '.asset_type')
+      ;;
   esac
 
   if [ "$valid" = "false" ]; then
@@ -509,14 +628,32 @@ NEG_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .typ
 BDG_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "SET_CAMPAIGN_DAILY_BUDGET")] | length')
 PAUSE_KW_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "PAUSE_KEYWORD")] | length')
 PAUSE_AG_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "PAUSE_ADGROUP")] | length')
+RSA_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "UPDATE_RSA_ASSETS")] | length')
+ASSET_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "CREATE_ADGROUP_ASSET")] | length')
 SKIP_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == false)] | length')
 
 [ "$NEG_COUNT" -gt 0 ] && echo -e "  • ${NEG_COUNT} negative keyword addition(s)"
 [ "$BDG_COUNT" -gt 0 ] && echo -e "  • ${BDG_COUNT} budget change(s)"
 [ "$PAUSE_KW_COUNT" -gt 0 ] && echo -e "  • ${PAUSE_KW_COUNT} keyword pause(s)"
 [ "$PAUSE_AG_COUNT" -gt 0 ] && echo -e "  • ${PAUSE_AG_COUNT} ad group pause(s)"
+[ "$RSA_COUNT" -gt 0 ] && echo -e "  • ${RSA_COUNT} RSA asset update(s)"
+[ "$ASSET_COUNT" -gt 0 ] && echo -e "  • ${ASSET_COUNT} extension asset(s)"
 [ "$SKIP_COUNT" -gt 0 ] && echo -e "  • ${YELLOW}${SKIP_COUNT} skipped (validation errors)${NC}"
-echo -e "  • Reversibility: ${GREEN}All actions reversible${NC}"
+
+if [ "$RSA_COUNT" -gt 0 ]; then
+  echo -e "  • Reversibility: ${GREEN}Assets restorable from snapshot${NC} ${DIM}(performance history of removed assets is not recoverable)${NC}"
+else
+  echo -e "  • Reversibility: ${GREEN}All actions reversible${NC}"
+fi
+
+# Learning-period warning for RSA asset changes. Adding assets resets ad
+# strength — CTR can dip for a week or two before the new mix settles.
+if [ "$RSA_COUNT" -gt 0 ]; then
+  echo ""
+  echo -e "${YELLOW}⚠️  RSA asset changes affect live ads.${NC}"
+  echo -e "${YELLOW}   New assets start a learning period — expect a temporary CTR dip.${NC}"
+  echo -e "${YELLOW}   Removed assets lose their performance history and cannot get it back.${NC}"
+fi
 
 if [ "$BDG_COUNT" -gt 0 ]; then
   SUM_CURRENT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "SET_CAMPAIGN_DAILY_BUDGET") | .current_daily_budget_micros] | add // 0')
@@ -553,15 +690,29 @@ fi
 # Step 4: Human confirmation
 # ═══════════════════════════════════════════════════════════
 echo ""
-if [ "$BDG_COUNT" -gt 0 ]; then
+if [ "$BDG_COUNT" -gt 0 ] && [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
+  echo -n "Type 'confirm budgets and assets' to proceed, or 'cancel' to abort: "
+elif [ "$BDG_COUNT" -gt 0 ]; then
   echo -n "Type 'confirm budgets' to proceed, or 'cancel' to abort: "
+elif [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
+  echo -n "Type 'confirm assets' to proceed, or 'cancel' to abort: "
 else
   echo -n "Type 'confirm' to proceed, or 'cancel' to abort: "
 fi
 read -r confirmation
 
-if [ "$BDG_COUNT" -gt 0 ]; then
+if [ "$BDG_COUNT" -gt 0 ] && [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
+  if [ "$confirmation" != "confirm budgets and assets" ]; then
+    echo -e "${YELLOW}Cancelled. No changes made.${NC}"
+    exit 0
+  fi
+elif [ "$BDG_COUNT" -gt 0 ]; then
   if [ "$confirmation" != "confirm budgets" ]; then
+    echo -e "${YELLOW}Cancelled. No changes made.${NC}"
+    exit 0
+  fi
+elif [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
+  if [ "$confirmation" != "confirm assets" ]; then
     echo -e "${YELLOW}Cancelled. No changes made.${NC}"
     exit 0
   fi
@@ -616,6 +767,7 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
   proposed_budget=$(echo "$action" | jq -r '.proposed_daily_budget_micros // empty')
   budget_pct=$(echo "$action" | jq -r '.budget_pct_change // empty')
   action_index=$(echo "$action" | jq -r '.index')
+  ad_id=$(echo "$action" | jq -r '.ad_id // empty')
 
   if [ "$action_type" = "SET_CAMPAIGN_DAILY_BUDGET" ]; then
     echo -n "  [${action_index}] ${action_type}: ${campaign_name} (${current_budget}->${proposed_budget}) ... "
@@ -643,6 +795,64 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       ;;
     PAUSE_ADGROUP)
       result=$(mutate_pause_adgroup "$CUSTOMER_ID" "$adgroup_id")
+      ;;
+    UPDATE_RSA_ASSETS)
+      # Server-side dry run first: validateOnly checks every limit, pin rule
+      # and duplicate-text rule against the real account without changing it.
+      merged_h=$(echo "$action" | jq -c '.merged_headlines')
+      merged_d=$(echo "$action" | jq -c '.merged_descriptions')
+      merged_u=$(echo "$action" | jq -c '.merged_final_urls')
+      validate_result=$(mutate_update_rsa_assets "$CUSTOMER_ID" "$ad_id" "$merged_h" "$merged_d" "$merged_u" "true")
+      if [ "$(echo "$validate_result" | jq -r '.success')" != "true" ]; then
+        echo -e "${RED}❌ server validation failed${NC}"
+        result="$validate_result"
+      else
+        result=$(mutate_update_rsa_assets "$CUSTOMER_ID" "$ad_id" "$merged_h" "$merged_d" "$merged_u" "false")
+      fi
+      ;;
+    CREATE_ADGROUP_ASSET)
+      # Extension assets need two calls: create the asset, then link it to
+      # the ad group. A failure between them leaves an orphan asset, so the
+      # created asset id goes into the reversal record either way.
+      asset_type=$(echo "$action" | jq -r '.asset_type')
+      asset_body=$(echo "$action" | jq -c '
+        . as $a
+        | ($a.asset_type) as $t
+        | {
+            name: ("asset-" + ($a.asset_type // "") + "-" + ($a.asset_link_text // $a.asset_text // $a.asset_header // "")),
+            sitelinkAsset: (if $t == "SITELINK" then {
+              linkText: $a.asset_link_text,
+              descriptionLine1: $a.asset_description_line_1,
+              descriptionLine2: $a.asset_description_line_2,
+              finalUrl: $a.asset_final_url,
+              startDate: $a.asset_start_date,
+              endDate: $a.asset_end_date
+            } else null end),
+            calloutAsset: (if $t == "CALLOUT" then {} else null end),
+            textAsset: (if $t == "CALLOUT" then {text: $a.asset_text} else null end),
+            structuredSnippetAsset: (if $t == "STRUCTURED_SNIPPET" then {
+              header: $a.asset_header,
+              values: $a.asset_values
+            } else null end)
+          }
+        | with_entries(select(.value != null))')
+
+      create_result=$(mutate_create_asset "$CUSTOMER_ID" "$asset_type" "$asset_body" "false")
+      if [ "$(echo "$create_result" | jq -r '.success')" != "true" ]; then
+        result="$create_result"
+      else
+        created_asset_rn=$(echo "$create_result" | jq -r '.resource_name')
+        created_asset_id="${created_asset_rn##*/}"
+        link_result=$(mutate_link_adgroup_asset "$CUSTOMER_ID" "$adgroup_id" "$created_asset_rn" "$asset_type" "false")
+        if [ "$(echo "$link_result" | jq -r '.success')" != "true" ]; then
+          # Link failed — surface the orphan asset so it can be cleaned up.
+          result=$(echo "$link_result" | jq --arg orphan "$created_asset_rn" \
+            '. + {orphan_asset: $orphan, error: (.error + " (orphan asset: " + $orphan + ")")}')
+        else
+          result=$(echo "$link_result" | jq --arg assetid "$created_asset_id" --arg assetrn "$created_asset_rn" \
+            '. + {created_asset_id: $assetid, created_asset_rn: $assetrn}')
+        fi
+      fi
       ;;
   esac
 
@@ -682,10 +892,29 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
           reversal_action="ENABLE_ADGROUP"
           reversal_resource="$resource_name"
           ;;
+        UPDATE_RSA_ASSETS)
+          # Undo restores the exact asset list captured before the change.
+          reversal_action="RESTORE_RSA_ASSETS"
+          reversal_resource="$resource_name"
+          ;;
+        CREATE_ADGROUP_ASSET)
+          reversal_action="REMOVE_ADGROUP_ASSET"
+          reversal_resource="$resource_name"
+          ;;
       esac
 
       # For budgets, store before/after in reversal record; keep keyword/match fields stable for registry tooling.
       if [ "$action_type" = "SET_CAMPAIGN_DAILY_BUDGET" ]; then
+        keyword="-"
+        match_type="N/A"
+      fi
+
+      # Asset actions keep the pre-change list in `snapshot` — that is what
+      # undo restores. Other action types leave it null.
+      asset_snapshot=$(echo "$action" | jq -c '.snapshot // null')
+      created_asset_id=$(echo "$result" | jq -r '.created_asset_id // ""')
+      created_asset_rn=$(echo "$result" | jq -r '.created_asset_rn // ""')
+      if [ "$action_type" = "UPDATE_RSA_ASSETS" ] || [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
         keyword="-"
         match_type="N/A"
       fi
@@ -705,8 +934,11 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
         --arg reversalResource "$reversal_resource" \
         --arg resourceName "$resource_name" \
         --arg budgetResourceName "$budget_rn" \
+        --arg createdAssetId "$created_asset_id" \
+        --arg createdAssetRn "$created_asset_rn" \
         --argjson beforeMicros "${current_budget:-0}" \
         --argjson afterMicros "${proposed_budget:-0}" \
+        --argjson assetSnapshot "$asset_snapshot" \
         '{
           id: $id,
           action: $action,
@@ -725,6 +957,9 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
           budgetResourceName: (if $budgetResourceName == "" then null else $budgetResourceName end),
           beforeMicros: $beforeMicros,
           afterMicros: $afterMicros,
+          snapshot: $assetSnapshot,
+          createdAssetId: (if $createdAssetId == "" then null else $createdAssetId end),
+          createdAssetResourceName: (if $createdAssetRn == "" then null else $createdAssetRn end),
           status: "active",
           undoneAt: null
         }')
@@ -732,6 +967,10 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       add_reversal_record "$reversal_record"
       if [ "$action_type" = "SET_CAMPAIGN_DAILY_BUDGET" ]; then
         log_action_result "$action_index" "$action_type" "$campaign_name" "${current_budget}->${proposed_budget} (${budget_pct}%)" "✅ Applied" "$reversal_id" "$budget_rn"
+      elif [ "$action_type" = "UPDATE_RSA_ASSETS" ]; then
+        log_action_result "$action_index" "$action_type" "${campaign_name}/${adgroup_name}" "$(echo "$action" | jq -r '.merged_headlines | length')H/$(echo "$action" | jq -r '.merged_descriptions | length')D" "✅ Applied" "$reversal_id" "$resource_name"
+      elif [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
+        log_action_result "$action_index" "$action_type" "${campaign_name}/${adgroup_name}" "$(echo "$action" | jq -r '.asset_type')" "✅ Applied" "$reversal_id" "$resource_name"
       else
         log_action_result "$action_index" "$action_type" "$campaign_name" "\"$keyword\" [$match_type]" "✅ Applied" "$reversal_id" "$resource_name"
       fi
@@ -790,6 +1029,19 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       ;;
     PAUSE_ADGROUP)
       verify_result=$(verify_adgroup_paused "$CUSTOMER_ID" "$campaign_name" "$adgroup_name")
+      ;;
+    UPDATE_RSA_ASSETS)
+      exp_h=$(echo "$action" | jq -c '.merged_headlines')
+      exp_d=$(echo "$action" | jq -c '.merged_descriptions')
+      verify_result=$(verify_rsa_assets "$CUSTOMER_ID" "$(echo "$action" | jq -r '.ad_id')" "$exp_h" "$exp_d")
+      ;;
+    CREATE_ADGROUP_ASSET)
+      # The created asset id lives in the reversal record (the execute loop
+      # is a separate scope).
+      created_asset_id=$(jq -r --arg d "$(basename "$DRAFT_FILE")" --arg aid "$action_index" \
+        '[.reversals[]? | select(.draftSource == $d and .status == "active" and .action == "CREATE_ADGROUP_ASSET")] | last | .createdAssetId // empty' \
+        "$REVERSAL_REGISTRY_FILE" 2>/dev/null)
+      verify_result=$(verify_adgroup_asset_exists "$CUSTOMER_ID" "$adgroup_name" "$created_asset_id")
       ;;
   esac
 

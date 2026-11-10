@@ -158,15 +158,19 @@ review_draft() {
   echo ""
 
   # Count by type
-  local neg_count pause_kw_count pause_ag_count
+  local neg_count pause_kw_count pause_ag_count rsa_count asset_count
   neg_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "ADD_NEGATIVE")] | length')
   pause_kw_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "PAUSE_KEYWORD")] | length')
   pause_ag_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "PAUSE_ADGROUP")] | length')
+  rsa_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "UPDATE_RSA_ASSETS")] | length')
+  asset_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "CREATE_ADGROUP_ASSET")] | length')
 
   echo -e "  ${CYAN}Action Breakdown:${NC}"
   [ "$neg_count" -gt 0 ] && echo -e "    📎 ${neg_count} negative keyword addition(s)  ${DIM}— Risk: Low${NC}"
   [ "$pause_kw_count" -gt 0 ] && echo -e "    ⏸️  ${pause_kw_count} keyword pause(s)              ${DIM}— Risk: Low${NC}"
   [ "$pause_ag_count" -gt 0 ] && echo -e "    ⏸️  ${pause_ag_count} ad group pause(s)             ${DIM}— Risk: Medium${NC}"
+  [ "$rsa_count" -gt 0 ] && echo -e "    🎯 ${rsa_count} RSA asset update(s)                ${DIM}— Risk: Medium${NC}"
+  [ "$asset_count" -gt 0 ] && echo -e "    🔗 ${asset_count} extension asset(s)               ${DIM}— Risk: Low${NC}"
   echo ""
 
   # Show each action
@@ -183,12 +187,27 @@ review_draft() {
 
     local icon=""
     case "$action_type" in
-      ADD_NEGATIVE)    icon="📎" ;;
-      PAUSE_KEYWORD)   icon="⏸️ " ;;
-      PAUSE_ADGROUP)   icon="⏸️ " ;;
+      ADD_NEGATIVE)        icon="📎" ;;
+      PAUSE_KEYWORD)       icon="⏸️ " ;;
+      PAUSE_ADGROUP)       icon="⏸️ " ;;
+      UPDATE_RSA_ASSETS)   icon="🎯" ;;
+      CREATE_ADGROUP_ASSET) icon="🔗" ;;
     esac
 
-    printf "    %s %-3d %-16s \"%-25s [%s]\n" "$icon" "$((i + 1))" "$action_type" "${keyword}\"" "$match_type"
+    if [ "$action_type" = "UPDATE_RSA_ASSETS" ]; then
+      local h_count d_count replace_flag
+      h_count=$(echo "$action" | jq '.asset_headlines | length')
+      d_count=$(echo "$action" | jq '.asset_descriptions | length')
+      replace_flag=$(echo "$action" | jq -r '.asset_replace // false')
+      printf "    %s %-3d %-20s %sH/%sD in \"%s\"%s\n" "$icon" "$((i + 1))" "$action_type" "$h_count" "$d_count" "$adgroup" \
+        "$([ "$replace_flag" = "true" ] && echo " [REPLACE]" || echo "")"
+    elif [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
+      local atype
+      atype=$(echo "$action" | jq -r '.asset_type')
+      printf "    %s %-3d %-20s %s in \"%s\"\n" "$icon" "$((i + 1))" "$action_type" "$atype" "$adgroup"
+    else
+      printf "    %s %-3d %-20s \"%-25s [%s]\n" "$icon" "$((i + 1))" "$action_type" "${keyword}\"" "$match_type"
+    fi
     if [ -n "$reason" ] && [ "$reason" != "null" ]; then
       echo -e "          ${DIM}${reason:0:80}${NC}"
     fi

@@ -68,11 +68,32 @@ The live apply layer supports three bounded write categories:
 - **Why now:** Budget reallocation is a core operator action, but it is gated behind stronger guardrails than the v1 writes
 - **Undo:** Restore the prior `amount_micros`
 
+### Action 4: Update RSA Text Assets
+- **What:** Add or replace headlines and descriptions on one responsive search ad
+- **How:** Only through an `## Apply Manifest` JSON block (schema v0.3)
+- **Why now:** RSA refresh from real buyer language is the copilot's signature strength — but it changes what customers see, so it needs its own guardrails
+- **Guardrails:**
+  - Read-modify-write. The API replaces the whole headline/description list on update, so the apply layer reads the live assets first and merges. `replace: false` (default) never drops an asset that is already serving.
+  - Server-side validation. Every mutation is sent once with `validateOnly: true` before the real call — limits, pin rules and duplicate-text checks run against the real account without changing it.
+  - Blast-radius guard. The action may only touch an ad group the draft names explicitly. An ad group holding more than one RSA is refused — the draft must say which.
+  - Learning-period acknowledgement. `replace: true` (dropping live assets) requires `acknowledge_learning_period: true` in the manifest.
+  - Separate confirmation. Asset drafts ask for `confirm assets`, not `confirm`.
+- **Undo:** Restore the exact asset list captured in the reversal registry snapshot. **Performance history of removed assets is not recoverable** — the undo prints that warning.
+
+### Action 5: Create Extension Asset
+- **What:** Create a sitelink, callout, or structured snippet and link it to one ad group
+- **How:** Only through an `## Apply Manifest` JSON block (schema v0.3)
+- **Why now:** Extensions are text-only and reversible (unlink removes the link), so they carry less risk than RSA edits
+- **Two API calls:** `assets:mutate` creates the asset, `adGroupAssets:mutate` links it. If the link fails, the created asset id is kept in the reversal record so the orphan can be cleaned up.
+- **Undo:** Remove the ad group asset link
+
 ### Explicitly NOT in Live Scope
 - ❌ Bid strategy changes
 - ❌ Shared budgets / portfolio budgets
 - ❌ Creating new campaigns or ad groups
-- ❌ Modifying RSA assets
+- ❌ Image / video assets (needs binary upload via `assets:mutate`)
+- ❌ PMax asset group changes (needs bulk `googleAds:mutate` with temporary IDs)
+- ❌ Campaign-level or customer-level assets
 - ❌ Enabling paused entities
 - ❌ Deleting anything
 - ❌ Conversion action changes
@@ -161,6 +182,24 @@ Log everything (see Audit Trail section below).
 ---
 
 ## Reversibility Model
+
+### Asset reversibility is snapshot-based, not delete-based
+
+Negative keywords and paused entities have an obvious inverse: remove the
+negative, re-enable the keyword. Ad assets do not.
+
+Removing a headline does not "undo" it — the asset is gone, and with it the
+impressions, clicks and conversions it accumulated. Re-adding the same text
+starts a new asset with no history.
+
+So the apply layer treats asset changes as **snapshot + restore**:
+
+1. Before mutating, the live headline/description list is read and stored in
+   the reversal record under `snapshot`.
+2. Undo sends that snapshot back. The ad serves the same text again.
+3. The undo output states plainly that performance history is not recoverable.
+
+This is the honest ceiling: the *content* is reversible, the *history* is not.
 
 ### How Undo Works
 

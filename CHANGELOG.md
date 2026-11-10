@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — Apply Layer v3: Ad Assets Without UI
+
+### Added
+- `UPDATE_RSA_ASSETS` apply action — add or replace RSA headlines and descriptions on one ad group
+- `CREATE_ADGROUP_ASSET` apply action — create sitelink, callout, or structured snippet and link it to an ad group
+- Apply Manifest schema v0.3 (v0.2 still accepted for budget-only drafts)
+- `lib/asset-rules.sh` — shared asset validation and merge rules (no API access, unit-tested from the eval suite)
+- `scripts/apply-layer/preview-asset-apply.sh` — offline preview of the asset apply flow against a stubbed API
+- `scripts/apply-layer/preview-asset-undo.sh` — offline preview of undoing an asset change
+- `evals/fixtures/draft-asset-manifest.md` — asset draft fixture
+- 20 new eval cases covering asset parser, guardrails, merged-list rules, and merge semantics
+
+### Safety model
+- Read-modify-write: the live asset list is read before every update, because the API replaces the whole list on mutation
+- `validateOnly` dry run before every asset mutation — limits, pin rules, and duplicate-text checks run against the live account without changing it
+- Snapshot-based reversal — the pre-change asset list is stored and restored on undo (performance history of removed assets is not recoverable, and the undo says so)
+- Blast-radius guard — an asset action may only touch an ad group the draft names explicitly
+- Separate confirmation phrase (`confirm assets`) distinct from budgets
+
+### Fixed
+- `gads-undo.sh` crashed on an undefined `DIM` colour variable
+- Asset lookups read the wrong GAQL response path, so `ad_id` resolved to null
+
 ## 0.4.0 — Public Alpha (Builder Preview) — 2026-03-15
 
 ### Highlights

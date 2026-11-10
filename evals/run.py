@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -208,13 +209,77 @@ def min_meaningful_delta(current: int) -> int:
     return max(math.ceil(current * 0.05), 5_000_000)
 
 
+def _run_asset_rules(func: str, arg: str) -> str:
+    """Call a function in lib/asset-rules.sh with one JSON argument.
+
+    The shell library is the single source of truth for asset rules, so the
+    eval suite exercises it directly instead of reimplementing the logic in
+    Python (which would let the two drift apart).
+    """
+    cmd = (
+        f'cd "{ROOT}" && source scripts/apply-layer/lib/asset-rules.sh && '
+        f'{func} "$ARG"'
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ARG": arg},
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"{func} failed")
+    return proc.stdout.strip()
+
+
 def evaluate_apply_case(case):
     if case["type"] == "parser_fixture":
       parsed = _parse_draft_via_bash(FIXTURES / case["fixture"])
+      # A parsed draft carries `meta` only when it came from an Apply Manifest
+      # (legacy markdown parsing has no manifest block).
       return {
           "action_count": parsed["action_count"],
           "first_type": parsed["actions"][0]["type"],
-          "mode": "manifest" if parsed.get("meta") is not None and case["fixture"] == "draft-budget-manifest.md" else "legacy",
+          "mode": "manifest" if parsed.get("meta") is not None else "legacy",
+      }
+
+    if case["type"] == "asset_guardrail":
+      reason = _run_asset_rules(
+          "asset_validate_action",
+          json.dumps(case["input"]["action"]),
+      )
+      return {"valid": reason == "", "reason": reason}
+
+    if case["type"] == "asset_merged_guardrail":
+      reason = _run_asset_rules(
+          "asset_validate_merged",
+          json.dumps(case["input"]["merged"]),
+      )
+      return {"valid": reason == "", "reason": reason}
+
+    if case["type"] == "asset_merge":
+      data = case["input"]
+      cmd = (
+          f'cd "{ROOT}" && source scripts/apply-layer/lib/asset-rules.sh && '
+          f'asset_merge_lists "$EXISTING" "$DRAFT" "$REPLACE"'
+      )
+      proc = subprocess.run(
+          ["bash", "-lc", cmd],
+          capture_output=True,
+          text=True,
+          env={
+              **os.environ,
+              "EXISTING": json.dumps(data["existing"]),
+              "DRAFT": json.dumps(data["draft"]),
+              "REPLACE": "true" if data["replace"] else "false",
+          },
+      )
+      if proc.returncode != 0:
+          raise RuntimeError(proc.stderr.strip() or "asset_merge_lists failed")
+      result = json.loads(proc.stdout)
+      return {
+          "headline_count": len(result["headlines"]),
+          "description_count": len(result["descriptions"]),
+          "final_urls": result["final_urls"],
       }
 
     data = case["input"]

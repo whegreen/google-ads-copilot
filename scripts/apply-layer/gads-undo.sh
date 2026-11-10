@@ -23,6 +23,7 @@ source "$LIB_DIR/audit-write.sh"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+DIM='\033[2m'
 BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -132,6 +133,8 @@ undo_single() {
   applied_at=$(echo "$record" | jq -r '.appliedAt')
   before_micros=$(echo "$record" | jq -r '.beforeMicros // empty')
   after_micros=$(echo "$record" | jq -r '.afterMicros // empty')
+  local snapshot
+  snapshot=$(echo "$record" | jq -c '.snapshot // null')
 
   echo -e "${BOLD}Undo: ${reversal_id}${NC}"
   echo ""
@@ -143,6 +146,13 @@ undo_single() {
   echo "  Resource:        ${resource_name}"
   if [ -n "$before_micros" ] && [ -n "$after_micros" ] && [ "$before_micros" != "0" ] && [ "$after_micros" != "0" ]; then
     echo "  Budget (micros): ${after_micros} -> ${before_micros}"
+  fi
+  if [ "$snapshot" != "null" ] && [ -n "$snapshot" ]; then
+    local snap_hc snap_dc
+    snap_hc=$(echo "$snapshot" | jq '.headlines | length')
+    snap_dc=$(echo "$snapshot" | jq '.descriptions | length')
+    echo "  Asset snapshot:  ${snap_hc} headline(s), ${snap_dc} description(s) to restore"
+    echo -e "${DIM}  Performance history of assets removed since then is not recoverable.${NC}"
   fi
   echo ""
 
@@ -209,6 +219,27 @@ undo_single() {
       else
         result='{"success": false, "error": "Missing beforeMicros for budget reversal"}'
       fi
+      ;;
+    RESTORE_RSA_ASSETS)
+      # Restore the exact asset list captured before the change. The API
+      # replaces the whole list, so the snapshot is sent as-is.
+      if [ "$snapshot" = "null" ] || [ -z "$snapshot" ]; then
+        result='{"success": false, "error": "Missing snapshot for RSA asset reversal"}'
+      else
+        local snap_h snap_d snap_u snap_ad_id
+        snap_h=$(echo "$snapshot" | jq -c '.headlines // []')
+        snap_d=$(echo "$snapshot" | jq -c '.descriptions // []')
+        snap_u=$(echo "$snapshot" | jq -c '.final_urls // []')
+        snap_ad_id="${resource_name##*/}"
+        if [ -n "$snap_ad_id" ]; then
+          result=$(mutate_update_rsa_assets "$account_id" "$snap_ad_id" "$snap_h" "$snap_d" "$snap_u" "false")
+        else
+          result='{"success": false, "error": "Cannot parse ad id from resource name"}'
+        fi
+      fi
+      ;;
+    REMOVE_ADGROUP_ASSET)
+      result=$(mutate_remove_adgroup_asset "$account_id" "$resource_name")
       ;;
     *)
       result='{"success": false, "error": "Unknown reversal action: '"$reversal_action"'"}'

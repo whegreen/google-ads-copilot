@@ -25,10 +25,11 @@ Apply-layer parsing rules:
 - If no manifest is present, apply falls back to legacy v1 markdown parsing (negatives + pauses).
 - If a manifest is present but invalid, apply MUST fail closed.
 
-## Schema (v0.2)
+## Schema (v0.3)
 
 Top-level object:
-- `draft_version` (required): `"0.2"`
+- `draft_version` (required): `"0.3"`
+  - `"0.2"` is still accepted for budget-only drafts (no asset actions).
 - `customer_id` (required): 10-digit string
 - `customer_name` (optional): string
 - `meta` (optional): object for draft-level policy
@@ -69,11 +70,125 @@ Action object (common fields):
     - `require_budget_neutral` (boolean, default true)
     - `tracking_min_confidence` (`"medium"` default)
 
+### v3 Apply Types (ad assets)
+
+Assets are what actually renders in the ad: RSA headlines/descriptions, and
+extensions (sitelinks, callouts, structured snippets).
+
+#### `UPDATE_RSA_ASSETS`
+Adds or replaces RSA text assets on one ad group.
+
+- `targets`:
+  - `campaign_name` (string, required)
+  - `adgroup_name` (string, required)
+  - `final_urls` (array of string, required, ≥1) — must carry an `http://` or `https://` prefix
+  - `headlines` (array, required): `{ "text": string, "pinned_field": string|null }`
+    - `text` ≤ 30 characters
+    - `pinned_field` ∈ `HEADLINE_1` \| `HEADLINE_2` \| `HEADLINE_3` (optional)
+  - `descriptions` (array, required): `{ "text": string, "pinned_field": string|null }`
+    - `text` ≤ 90 characters
+    - `pinned_field` ∈ `DESCRIPTION_1` \| `DESCRIPTION_2` (optional)
+  - `replace` (boolean, default false)
+    - `false` → merge with the assets already live (new assets only)
+    - `true` → the lists in this action ARE the final list (old assets are dropped)
+- `guardrails`:
+  - `max_assets_per_draft` (integer, default 10) — total headline+description count across the draft
+  - `acknowledge_learning_period` (boolean, default false) — must be `true` when `replace: true`
+  - `require_explicit_ad_group` (boolean, default true) — the ad group must be named in the draft
+
+**Why `replace` matters.** The Google Ads API replaces the *entire* headline
+and description list when you update an RSA. The apply layer therefore reads
+the live assets first and merges, so `replace: false` never drops an asset
+that is already serving.
+
+**Why `acknowledge_learning_period` is required for `replace: true`.**
+Dropping assets resets ad strength and can drop CTR for a while. A draft that
+removes live assets must say so explicitly.
+
+#### `CREATE_ADGROUP_ASSET`
+Creates an extension asset and links it to one ad group.
+
+- `targets`:
+  - `campaign_name` (string, required)
+  - `adgroup_name` (string, required)
+  - `asset_type` (string, required): `SITELINK` \| `CALLOUT` \| `STRUCTURED_SNIPPET`
+  - `final_url` (string, required) — `SITELINK` only
+  - `link_text` (string, required) — `SITELINK` only
+  - `description_line_1` (string, required) — `SITELINK` only
+  - `description_line_2` (string, optional) — `SITELINK` only
+  - `start_date` (string, `YYYY-MM-DD`, optional) — `SITELINK` only
+  - `end_date` (string, `YYYY-MM-DD`, optional) — `SITELINK` only
+  - `text` (string, required) — `CALLOUT` only
+  - `header` (string, required) — `STRUCTURED_SNIPPET` only
+  - `values` (array of string, required) — `STRUCTURED_SNIPPET` only
+- `guardrails`: same `max_assets_per_draft` cap as above
+
+Sitelinks need both `start_date` and `end_date` to serve. Without a start
+date the asset is created but never eligible.
+
+## Example (RSA Asset Refresh)
+
+```json
+{
+  "draft_version": "0.3",
+  "customer_id": "1234567890",
+  "meta": {
+    "budget_policy": {
+      "allow_net_increase": false,
+      "max_net_increase_pct": 10
+    }
+  },
+  "actions": [
+    {
+      "id": "r1",
+      "type": "UPDATE_RSA_ASSETS",
+      "risk": "medium",
+      "reason": "Headline from converting query 'crane rental'.",
+      "targets": {
+        "campaign_name": "High Intent - Search",
+        "adgroup_name": "Crane Rental",
+        "final_urls": ["https://example.com/rental"],
+        "headlines": [
+          { "text": "Crane Rental Service", "pinned_field": "HEADLINE_1" },
+          { "text": "Certified Crane Operators" }
+        ],
+        "descriptions": [
+          { "text": "Certified operators available 24/7 for your lift." }
+        ],
+        "replace": false
+      },
+      "guardrails": {
+        "max_assets_per_draft": 10,
+        "acknowledge_learning_period": false,
+        "require_explicit_ad_group": true
+      }
+    },
+    {
+      "id": "s1",
+      "type": "CREATE_ADGROUP_ASSET",
+      "risk": "low",
+      "reason": "Sitelink for fleet specs page.",
+      "targets": {
+        "campaign_name": "High Intent - Search",
+        "adgroup_name": "Crane Rental",
+        "asset_type": "SITELINK",
+        "link_text": "Fleet Specs",
+        "description_line_1": "See crane specs and capacity",
+        "description_line_2": "Compare before you book",
+        "final_url": "https://example.com/specs",
+        "start_date": "2026-11-10",
+        "end_date": "2026-12-10"
+      }
+    }
+  ]
+}
+```
+
 ## Example (Budget Reallocation)
 
 ```json
 {
-  "draft_version": "0.2",
+  "draft_version": "0.3",
   "customer_id": "1234567890",
   "meta": {
     "budget_policy": {

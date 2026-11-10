@@ -34,6 +34,13 @@
 
 set -euo pipefail
 
+# Asset validation rules (shared with gads-apply.sh and the eval suite).
+# Sourced here so parse-draft.sh can reject a malformed asset draft on its own.
+_ASSET_RULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -f asset_validate_action >/dev/null 2>&1; then
+  source "${_ASSET_RULES_DIR}/asset-rules.sh"
+fi
+
 _first_quoted_value() {
   printf '%s\n' "$1" | sed -nE 's/^[^"]*"([^"]+)".*/\1/p' | head -1
 }
@@ -66,8 +73,9 @@ _parse_apply_manifest() {
   fi
 
   # Validate minimal shape and reject unknown action types up front.
+  # v0.3 adds asset actions; v0.2 stays valid for budget-only drafts.
   if ! echo "$manifest_json" | jq -e '
-    .draft_version == "0.2"
+    (.draft_version == "0.2" or .draft_version == "0.3")
     and (.customer_id | type == "string")
     and (.actions | type == "array")
     and (.actions | length > 0)
@@ -76,12 +84,28 @@ _parse_apply_manifest() {
       "ADD_NEGATIVE_ADGROUP",
       "PAUSE_KEYWORD",
       "PAUSE_ADGROUP",
-      "SET_CAMPAIGN_DAILY_BUDGET"
+      "SET_CAMPAIGN_DAILY_BUDGET",
+      "UPDATE_RSA_ASSETS",
+      "CREATE_ADGROUP_ASSET"
     ] | index($t))
   ' >/dev/null 2>&1; then
-    echo "ERROR: Apply Manifest present but invalid (expected schema v0.2)" >&2
+    echo "ERROR: Apply Manifest present but invalid (expected schema v0.2 or v0.3)" >&2
     return 1
   fi
+
+  # Asset actions carry their own hard limits. Validate them here so a bad
+  # draft fails before any API call, not after the first mutation.
+  # The rules live in asset-rules.sh — one source of truth, shared with
+  # gads-apply.sh and the eval suite.
+  local asset_err
+  while IFS= read -r asset_err; do
+    if [ -n "$asset_err" ]; then
+      echo "ERROR: Apply Manifest asset action failed pre-flight validation: ${asset_err}" >&2
+      return 1
+    fi
+  done < <(echo "$manifest_json" | jq -c '.actions[] | select(.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET") | {type, adgroup: (.targets.adgroup_name // ""), guardrails: (.guardrails // {}), asset_headlines: (.targets.headlines // []), asset_descriptions: (.targets.descriptions // []), asset_final_urls: (.targets.final_urls // []), asset_replace: (.targets.replace // false), asset_type: (.targets.asset_type // ""), asset_link_text: (.targets.link_text // ""), asset_description_line_1: (.targets.description_line_1 // ""), asset_final_url: (.targets.final_url // ""), asset_start_date: (.targets.start_date // ""), asset_end_date: (.targets.end_date // ""), asset_text: (.targets.text // ""), asset_header: (.targets.header // ""), asset_values: (.targets.values // [])}' | while IFS= read -r a; do
+    asset_validate_action "$a"
+  done)
 
   # Transform manifest actions into the legacy apply-layer action shape.
   # This keeps gads-apply.sh compatible while enabling new action types (budgets).
@@ -120,14 +144,17 @@ _parse_apply_manifest() {
                   keyword: (
                     if $a.type == "SET_CAMPAIGN_DAILY_BUDGET" then ""
                     elif $a.type == "PAUSE_ADGROUP" then (req_str($a; ["targets","adgroup_name"]))
+                    elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then ""
                     else (req_str($a; ["targets","keyword_text"])) end
                   ),
                   match_type: (
                     if $a.type == "SET_CAMPAIGN_DAILY_BUDGET" or $a.type == "PAUSE_ADGROUP" then "N/A"
+                    elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then "N/A"
                     else (upcase(req_str($a; ["targets","match_type"]))) end
                   ),
                   scope: (
                     if $a.type == "ADD_NEGATIVE_ADGROUP" or $a.type == "PAUSE_KEYWORD" then "AD_GROUP"
+                    elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then "AD_GROUP"
                     else "CAMPAIGN" end
                   ),
                   campaign: (
@@ -135,6 +162,7 @@ _parse_apply_manifest() {
                   ),
                   adgroup: (
                     if $a.type == "ADD_NEGATIVE_ADGROUP" or $a.type == "PAUSE_KEYWORD" or $a.type == "PAUSE_ADGROUP" then (req_str($a; ["targets","adgroup_name"]))
+                    elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then (req_str($a; ["targets","adgroup_name"]))
                     else null end
                   ),
                   reason: ($a.reason // ""),
@@ -143,6 +171,64 @@ _parse_apply_manifest() {
 
                   proposed_daily_budget_micros: (
                     if $a.type == "SET_CAMPAIGN_DAILY_BUDGET" then (req_int($a; ["targets","proposed_daily_budget_micros"]))
+                    else null end
+                  ),
+
+                  # ── v3 asset actions ──
+                  asset_headlines: (
+                    if $a.type == "UPDATE_RSA_ASSETS" then (($a.targets.headlines // []) | map({text: .text, pinned_field: (.pinned_field // null)}))
+                    else null end
+                  ),
+                  asset_descriptions: (
+                    if $a.type == "UPDATE_RSA_ASSETS" then (($a.targets.descriptions // []) | map({text: .text, pinned_field: (.pinned_field // null)}))
+                    else null end
+                  ),
+                  asset_final_urls: (
+                    if $a.type == "UPDATE_RSA_ASSETS" then ($a.targets.final_urls // [])
+                    else null end
+                  ),
+                  asset_replace: (
+                    if $a.type == "UPDATE_RSA_ASSETS" then (($a.targets.replace // false) == true)
+                    else null end
+                  ),
+                  asset_type: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.asset_type // "")
+                    else null end
+                  ),
+                  asset_link_text: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.link_text // "")
+                    else null end
+                  ),
+                  asset_description_line_1: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.description_line_1 // "")
+                    else null end
+                  ),
+                  asset_description_line_2: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.description_line_2 // "")
+                    else null end
+                  ),
+                  asset_final_url: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.final_url // "")
+                    else null end
+                  ),
+                  asset_start_date: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.start_date // "")
+                    else null end
+                  ),
+                  asset_end_date: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.end_date // "")
+                    else null end
+                  ),
+                  asset_text: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.text // "")
+                    else null end
+                  ),
+                  asset_header: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.header // "")
+                    else null end
+                  ),
+                  asset_values: (
+                    if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.values // [])
                     else null end
                   )
                 }

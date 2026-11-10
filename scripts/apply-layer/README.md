@@ -14,6 +14,24 @@ from approved drafts to real Google Ads API mutations.
 **v2 scope (budget):** Set campaign daily budgets with hard guardrails (max % change, cooldowns, tracking gate, budget-neutral default).
 Budget actions require an `## Apply Manifest` JSON block (see `drafts/ACTION-MANIFEST.md`).
 
+**v3 scope (assets):** Update RSA text assets (headlines/descriptions) and create extension assets (sitelink, callout, structured snippet).
+Also requires an `## Apply Manifest` JSON block (schema v0.3).
+
+Asset writes are the first apply actions that change what customers actually
+see, so they carry extra guardrails:
+
+- **Read-modify-write.** The Google Ads API replaces the *entire* headline and
+  description list on update. The apply layer reads the live assets first and
+  merges, so `replace: false` never drops an asset that is already serving.
+- **Server-side validation.** Every asset mutation is sent once with
+  `validateOnly: true` before the real call — limits, pin rules and
+  duplicate-text checks run against the real account without changing it.
+- **Snapshot reversal.** The pre-change asset list is stored in the reversal
+  registry. Undo restores that exact list. Performance history of removed
+  assets is *not* recoverable — the undo says so out loud.
+- **Blast-radius guard.** An asset action may only touch an ad group the draft
+  names explicitly, and it needs its own `confirm assets` confirmation.
+
 ### Flow
 
 ```
@@ -33,8 +51,11 @@ Budget actions require an `## Apply Manifest` JSON block (see `drafts/ACTION-MAN
 | `gads-status.sh` | Operator state overview — connection, drafts, reversals |
 | `gads-auth.sh` | Get/refresh OAuth2 access token, test API connectivity |
 | `gads-smoke-test.sh` | End-to-end write cycle test (`negative` or `budget` mode) |
+| `preview-asset-apply.sh` | Offline preview of the asset apply flow against a stubbed API |
+| `preview-asset-undo.sh` | Offline preview of undoing an asset change |
 | `lib/config.sh` | Shared config: API version, base URL, GAQL escaping helpers |
-| `lib/parse-draft.sh` | Extract structured actions from draft markdown (negatives + pauses) |
+| `lib/parse-draft.sh` | Extract structured actions from draft markdown (negatives + pauses + assets) |
+| `lib/asset-rules.sh` | Pure asset validation + merge rules (no API access) |
 | `lib/api-mutate.sh` | Execute a single Google Ads API mutation |
 | `lib/api-verify.sh` | Verify a mutation took effect via GAQL query + ID lookups |
 | `lib/audit-write.sh` | Write audit trail entries |
@@ -77,6 +98,10 @@ source data/google-ads-mcp.test.env.sh
 # Dry run only (resolves IDs via API but doesn't mutate)
 ./scripts/apply-layer/gads-apply.sh --dry-run workspace/ads/drafts/<your-draft>.md
 
+# Preview the asset flow offline — stubbed API, no live account, no credentials
+./scripts/apply-layer/preview-asset-apply.sh workspace/ads/drafts/<your-asset-draft>.md
+./scripts/apply-layer/preview-asset-undo.sh rev-001
+
 # Apply a draft (full flow: parse → validate → dry-run → confirm → execute → verify → audit)
 ./scripts/apply-layer/gads-apply.sh workspace/ads/drafts/<your-draft>.md
 
@@ -89,6 +114,17 @@ source data/google-ads-mcp.test.env.sh
 # Undo an entire draft
 ./scripts/apply-layer/gads-undo.sh --draft workspace/ads/drafts/<your-draft>.md
 ```
+
+### Asset action confirmations
+
+Asset writes ask for their own confirmation phrase, separate from budgets:
+
+| Draft contains | Type to confirm |
+|----------------|-----------------|
+| Budget actions only | `confirm budgets` |
+| Asset actions only | `confirm assets` |
+| Both | `confirm budgets and assets` |
+| Neither | `confirm` |
 
 ### API Version History
 

@@ -383,3 +383,144 @@ lookup_keyword_criterion_id() {
 
   echo "$result" | jq -r '[.[].results[]?.adGroupCriterion.criterionId] | first // empty' 2>/dev/null
 }
+
+# ═══════════════════════════════════════════════════════════
+# LOOKUP: Resolve ad group → its enabled responsive search ads
+# ═══════════════════════════════════════════════════════════
+# Returns one JSON object per RSA:
+#   { "ad_id": "...", "ad_group_ad_id": "...", "name": "..." }
+# The ad_id is what ads:mutate needs (customers/{cid}/ads/{ad_id}).
+lookup_rsa_ads_in_adgroup() {
+  local customer_id="$1"
+  local campaign_name="$2"
+  local adgroup_name="$3"
+
+  local safe_campaign safe_adgroup
+  safe_campaign=$(_gaql_escape "$campaign_name")
+  safe_adgroup=$(_gaql_escape "$adgroup_name")
+
+  local query="SELECT
+    ad_group_ad.id,
+    ad_group_ad.ad.id,
+    ad_group_ad.ad.name,
+    ad_group_ad.ad.type,
+    ad_group_ad.status
+  FROM ad_group_ad
+  WHERE ad_group.name = '${safe_adgroup}'
+    AND campaign.name = '${safe_campaign}'
+    AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+    AND ad_group_ad.status != 'REMOVED'"
+
+  local result
+  result=$(_gaql_query "$customer_id" "$query")
+
+  echo "$result" | jq -c '[.[].results[]? | {
+    ad_group_ad_id: (.adGroupAd.id | tostring),
+    ad_id: (.adGroupAd.ad.id | tostring),
+    name: (.adGroupAd.ad.name // ""),
+    type: (.adGroupAd.ad.type // "")
+  }]' 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════
+# READ: Fetch the live RSA assets (headlines + descriptions + pins)
+# ═══════════════════════════════════════════════════════════
+# Returns:
+#   { "headlines": [{"text":"...","pinned_field":"HEADLINE_1"}],
+#     "descriptions": [...],
+#     "final_urls": ["https://..."] }
+#
+# ad_group_ad_asset_view is used (not ad_group_ad.ad.responsive_search_ad)
+# because it exposes pinned_field per asset plus the performance label.
+# The RSA asset list is the source of truth for what is currently serving.
+fetch_rsa_assets() {
+  local customer_id="$1"
+  local ad_id="$2"
+
+  local query="SELECT
+    ad_group_ad.ad.responsive_search_ad.headlines,
+    ad_group_ad.ad.responsive_search_ad.descriptions,
+    ad_group_ad.ad.final_urls
+  FROM ad_group_ad
+  WHERE ad_group_ad.ad.id = ${ad_id}
+    AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'"
+
+  local result
+  result=$(_gaql_query "$customer_id" "$query")
+
+  local headlines descriptions final_urls
+  headlines=$(echo "$result" | jq -c '[.[].results[]?.adGroupAd.ad.responsiveSearchAd.headlines[]? | {text: .text, pinned_field: (.pinnedField // "")}]' 2>/dev/null)
+  descriptions=$(echo "$result" | jq -c '[.[].results[]?.adGroupAd.ad.responsiveSearchAd.descriptions[]? | {text: .text, pinned_field: (.pinnedField // "")}]' 2>/dev/null)
+  final_urls=$(echo "$result" | jq -c '[.[].results[]?.adGroupAd.ad.finalUrls[]?] | flatten | unique' 2>/dev/null)
+
+  [ -z "$headlines" ] && headlines="[]"
+  [ -z "$descriptions" ] && descriptions="[]"
+  [ -z "$final_urls" ] && final_urls="[]"
+
+  jq -n \
+    --argjson headlines "$headlines" \
+    --argjson descriptions "$descriptions" \
+    --argjson final_urls "$final_urls" \
+    '{headlines: $headlines, descriptions: $descriptions, final_urls: $final_urls}'
+}
+
+# ═══════════════════════════════════════════════════════════
+# VERIFY: RSA assets now match what the draft asked for
+# ═══════════════════════════════════════════════════════════
+# Every headline/description in the expected list must be live. Extra live
+# assets are tolerated (merge mode adds without removing) but missing ones
+# mean the update did not land.
+verify_rsa_assets() {
+  local customer_id="$1"
+  local ad_id="$2"
+  local expected_headlines="$3"
+  local expected_descriptions="$4"
+
+  local live
+  live=$(fetch_rsa_assets "$customer_id" "$ad_id")
+
+  local missing_h missing_d
+  missing_h=$(echo "$live" | jq -c --argjson exp "$expected_headlines" '
+    [$exp[] | .text] - ([.headlines[].text]) | length')
+  missing_d=$(echo "$live" | jq -c --argjson exp "$expected_descriptions" '
+    [$exp[] | .text] - ([.descriptions[].text]) | length')
+
+  local live_h_count live_d_count
+  live_h_count=$(echo "$live" | jq '.headlines | length')
+  live_d_count=$(echo "$live" | jq '.descriptions | length')
+
+  if [ "$missing_h" -eq 0 ] && [ "$missing_d" -eq 0 ]; then
+    jq -n --argjson h "$live_h_count" --argjson d "$live_d_count" \
+      '{verified: true, detail: ("RSA live: " + ($h|tostring) + " headline(s), " + ($d|tostring) + " description(s)")}'
+  else
+    jq -n --argjson mh "$missing_h" --argjson md "$missing_d" \
+      '{verified: false, detail: ("RSA missing " + ($mh|tostring) + " headline(s), " + ($md|tostring) + " description(s)")}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# VERIFY: An extension asset is linked to the ad group
+# ═══════════════════════════════════════════════════════════
+verify_adgroup_asset_exists() {
+  local customer_id="$1"
+  local adgroup_name="$2"
+  local asset_id="$3"
+
+  local safe_adgroup
+  safe_adgroup=$(_gaql_escape "$adgroup_name")
+
+  local query="SELECT ad_group_asset.resource_name FROM ad_group_asset
+    WHERE ad_group.name = '${safe_adgroup}' AND ad_group_asset.asset.id = ${asset_id}"
+
+  local result
+  result=$(_gaql_query "$customer_id" "$query")
+
+  local found
+  found=$(echo "$result" | jq -r '[.[].results[]?.adGroupAsset.resourceName] | first // empty' 2>/dev/null)
+
+  if [ -n "$found" ]; then
+    jq -n --arg rn "$found" '{verified: true, detail: ("asset linked: " + $rn)}'
+  else
+    jq -n '{verified: false, detail: "asset not found on ad group"}'
+  fi
+}

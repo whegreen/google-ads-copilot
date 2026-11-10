@@ -58,6 +58,19 @@ _gads_call() {
   fi
 }
 
+# Wrapper: same call but with "validateOnly": true injected at request level.
+# Google Ads validates the whole payload (limits, pins, duplicate text) without
+# executing anything — a free dry-run on the server side.
+_gads_call_validate_only() {
+  local method="$1"
+  local url="$2"
+  local body="$3"
+
+  local validated
+  validated=$(echo "$body" | jq '. + {validateOnly: true}')
+  _gads_call "$method" "$url" "$validated"
+}
+
 # ═══════════════════════════════════════════════════════════
 # MUTATION: Add campaign-level negative keyword
 # ═══════════════════════════════════════════════════════════
@@ -319,6 +332,212 @@ mutate_remove_adgroup_criterion() {
     }')
 
   local url="${GADS_API_BASE}/customers/${customer_id}/adGroupCriteria:mutate"
+
+  local result
+  if result=$(_gads_call "POST" "$url" "$payload"); then
+    jq -n --arg rn "$resource_name" '{success: true, removed: $rn}'
+  else
+    local error_msg
+    error_msg=$(echo "$result" 2>&1 | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Update RSA text assets (headlines + descriptions)
+# ═══════════════════════════════════════════════════════════
+# Update an existing responsive search ad's assets.
+#
+#   mutate_update_rsa_assets <customer_id> <ad_id> <headlines_json> <descriptions_json> <final_urls_json> [validate_only]
+#
+# headlines_json / descriptions_json: [{"text":"...","pinned_field":"HEADLINE_1"}]
+#   pinned_field may be null/"" (unpinned).
+#
+# WARNING: the updateMask replaces the ENTIRE headlines and descriptions list.
+# The caller must pass the full intended list (existing assets merged with new
+# ones). Sending only the new assets would delete everything already serving.
+mutate_update_rsa_assets() {
+  local customer_id="$1"
+  local ad_id="$2"
+  local headlines_json="$3"
+  local descriptions_json="$4"
+  local final_urls_json="$5"
+  local validate_only="${6:-false}"
+
+  local ad_rn="customers/${customer_id}/ads/${ad_id}"
+
+  # REST JSON uses camelCase: pinnedField, finalUrls, responsiveSearchAd.
+  local payload
+  payload=$(jq -n \
+    --arg rn "$ad_rn" \
+    --argjson headlines "$headlines_json" \
+    --argjson descriptions "$descriptions_json" \
+    --argjson finalUrls "$final_urls_json" \
+    '{
+      "operations": [{
+        "updateMask": "responsive_search_ad.headlines,responsive_search_ad.descriptions",
+        "update": {
+          "resourceName": $rn,
+          "finalUrls": $finalUrls,
+          "responsiveSearchAd": {
+            "headlines": ($headlines | map(
+              if (.pinned_field // "") == "" then {text: .text}
+              else {text: .text, pinnedField: .pinned_field} end)),
+            "descriptions": ($descriptions | map(
+              if (.pinned_field // "") == "" then {text: .text}
+              else {text: .text, pinnedField: .pinned_field} end))
+          }
+        }
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/ads:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    [ -z "$resource_name" ] && resource_name="$ad_rn"
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Create an extension asset (sitelink / callout / snippet)
+# ═══════════════════════════════════════════════════════════
+#   mutate_create_asset <customer_id> <asset_type> <asset_body_json> [validate_only]
+#
+# asset_body_json is the type-specific body, e.g. for SITELINK:
+#   {"name":"...","sitelinkAsset":{"linkText":"...","descriptionLine1":"...",
+#    "descriptionLine2":"...","finalUrl":"https://...","startDate":"2026-11-10"}}
+#
+# Returns the new asset resource name — needed to link it in a second call.
+mutate_create_asset() {
+  local customer_id="$1"
+  local asset_type="$2"
+  local asset_body_json="$3"
+  local validate_only="${4:-false}"
+
+  local payload
+  payload=$(jq -n \
+    --arg type "$asset_type" \
+    --argjson body "$asset_body_json" \
+    '{
+      "operations": [{
+        "create": ($body + {type: $type})
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/assets:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Link an asset to an ad group
+# ═══════════════════════════════════════════════════════════
+#   mutate_link_adgroup_asset <customer_id> <adgroup_id> <asset_resource_name> <field_type> [validate_only]
+#
+# field_type is the AssetFieldType: SITELINK | CALLOUT | STRUCTURED_SNIPPET.
+mutate_link_adgroup_asset() {
+  local customer_id="$1"
+  local adgroup_id="$2"
+  local asset_resource_name="$3"
+  local field_type="$4"
+  local validate_only="${5:-false}"
+
+  local payload
+  payload=$(jq -n \
+    --arg ag "customers/${customer_id}/adGroups/${adgroup_id}" \
+    --arg asset "$asset_resource_name" \
+    --arg ft "$field_type" \
+    '{
+      "operations": [{
+        "create": {
+          "adGroup": $ag,
+          "asset": $asset,
+          "fieldType": $ft
+        }
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/adGroupAssets:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# REVERSAL: Remove an ad group asset link (undo extension)
+# ═══════════════════════════════════════════════════════════
+mutate_remove_adgroup_asset() {
+  local customer_id="$1"
+  local resource_name="$2"  # customers/{cid}/adGroupAssets/{agId}~{assetId}~{fieldType}
+
+  local payload
+  payload=$(jq -n \
+    --arg rn "$resource_name" \
+    '{
+      "operations": [{
+        "remove": $rn
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/adGroupAssets:mutate"
 
   local result
   if result=$(_gads_call "POST" "$url" "$payload"); then

@@ -148,5 +148,329 @@
       "reason": "ok",
       "net_delta_micros": 0
     }
+  },
+  {
+    "id": "manifest-parser-asset-draft",
+    "type": "parser_fixture",
+    "fixture": "draft-asset-manifest.md",
+    "expected": {
+      "action_count": 2,
+      "first_type": "UPDATE_RSA_ASSETS",
+      "mode": "manifest"
+    }
+  },
+  {
+    "id": "asset-valid-rsa-passes",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": { "max_assets_per_draft": 10, "acknowledge_learning_period": false },
+        "asset_final_urls": ["https://example.com/rental"],
+        "asset_headlines": [{ "text": "Certified Crane Operators", "pinned_field": "HEADLINE_1" }],
+        "asset_descriptions": [{ "text": "Operators available 24/7 for your lift." }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "asset-headline-over-30-chars-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "This headline is definitely longer than thirty characters" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "headline_too_long" }
+  },
+  {
+    "id": "asset-description-over-90-chars-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Fine headline" }],
+        "asset_descriptions": [{ "text": "This description is well over ninety characters long and should therefore be rejected before it ever reaches the API endpoint." }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "description_too_long" }
+  },
+  {
+    "id": "asset-missing-final-urls-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": [],
+        "asset_headlines": [{ "text": "Fine headline" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "final_urls_missing" }
+  },
+  {
+    "id": "asset-final-url-without-protocol-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": ["example.com/rental"],
+        "asset_headlines": [{ "text": "Fine headline" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "final_urls_invalid" }
+  },
+  {
+    "id": "asset-output-only-pin-field-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Fine headline", "pinned_field": "TEXT_DISCLAIMER" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "headline_pin_invalid" }
+  },
+  {
+    "id": "asset-duplicate-headline-text-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Same text" }, { "text": "Same text" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "headline_duplicate" }
+  },
+  {
+    "id": "asset-replace-requires-learning-period-acknowledgement",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": { "acknowledge_learning_period": false },
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Only headline" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": true
+      }
+    },
+    "expected": { "valid": false, "reason": "learning_period_not_acknowledged" }
+  },
+  {
+    "id": "asset-replace-with-acknowledgement-passes",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "Crane Rental",
+        "guardrails": { "acknowledge_learning_period": true },
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Only headline" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": true
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "asset-without-named-adgroup-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_RSA_ASSETS",
+        "adgroup": "",
+        "guardrails": { "require_explicit_ad_group": true },
+        "asset_final_urls": ["https://example.com"],
+        "asset_headlines": [{ "text": "Fine headline" }],
+        "asset_descriptions": [{ "text": "D" }],
+        "asset_replace": false
+      }
+    },
+    "expected": { "valid": false, "reason": "adgroup_not_explicit" }
+  },
+  {
+    "id": "sitelink-missing-link-text-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "CREATE_ADGROUP_ASSET",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_type": "SITELINK",
+        "asset_link_text": "",
+        "asset_description_line_1": "See crane specs",
+        "asset_final_url": "https://example.com/specs"
+      }
+    },
+    "expected": { "valid": false, "reason": "link_text_missing" }
+  },
+  {
+    "id": "sitelink-valid-passes",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "CREATE_ADGROUP_ASSET",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_type": "SITELINK",
+        "asset_link_text": "Fleet Specs",
+        "asset_description_line_1": "See crane specs and capacity",
+        "asset_final_url": "https://example.com/specs",
+        "asset_start_date": "2026-11-10",
+        "asset_end_date": "2026-12-10"
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "unknown-asset-type-blocked",
+    "type": "asset_guardrail",
+    "input": {
+      "action": {
+        "type": "CREATE_ADGROUP_ASSET",
+        "adgroup": "Crane Rental",
+        "guardrails": {},
+        "asset_type": "MYSTERY"
+      }
+    },
+    "expected": { "valid": false, "reason": "asset_type_invalid" }
+  },
+  {
+    "id": "merged-list-too-few-headlines-blocked",
+    "type": "asset_merged_guardrail",
+    "input": {
+      "merged": {
+        "headlines": [{ "text": "Only one" }],
+        "descriptions": [{ "text": "D" }, { "text": "E" }]
+      }
+    },
+    "expected": { "valid": false, "reason": "merged_headlines_too_few" }
+  },
+  {
+    "id": "merged-list-unfillable-pin-positions-blocked",
+    "type": "asset_merged_guardrail",
+    "input": {
+      "merged": {
+        "headlines": [
+          { "text": "A", "pinned_field": "HEADLINE_1" },
+          { "text": "B", "pinned_field": "HEADLINE_1" },
+          { "text": "C", "pinned_field": "HEADLINE_1" }
+        ],
+        "descriptions": [{ "text": "D" }, { "text": "E" }]
+      }
+    },
+    "expected": { "valid": false, "reason": "merged_pin_positions_unfillable" }
+  },
+  {
+    "id": "merged-list-valid-passes",
+    "type": "asset_merged_guardrail",
+    "input": {
+      "merged": {
+        "headlines": [
+          { "text": "A", "pinned_field": "HEADLINE_1" },
+          { "text": "B", "pinned_field": "" },
+          { "text": "C", "pinned_field": "" }
+        ],
+        "descriptions": [{ "text": "D", "pinned_field": "" }, { "text": "E", "pinned_field": "" }]
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "merge-keeps-live-assets-and-adds-new",
+    "type": "asset_merge",
+    "input": {
+      "existing": {
+        "headlines": [{ "text": "Old H1", "pinned_field": "HEADLINE_1" }, { "text": "Old H2", "pinned_field": "" }],
+        "descriptions": [{ "text": "Old D1", "pinned_field": "" }],
+        "final_urls": ["https://old.example.com"]
+      },
+      "draft": {
+        "headlines": [{ "text": "New H1", "pinned_field": "" }],
+        "descriptions": [{ "text": "New D1", "pinned_field": "" }],
+        "final_urls": ["https://new.example.com"]
+      },
+      "replace": false
+    },
+    "expected": {
+      "headline_count": 3,
+      "description_count": 2,
+      "final_urls": ["https://new.example.com"]
+    }
+  },
+  {
+    "id": "merge-replace-drops-live-assets",
+    "type": "asset_merge",
+    "input": {
+      "existing": {
+        "headlines": [{ "text": "Old H1", "pinned_field": "" }],
+        "descriptions": [{ "text": "Old D1", "pinned_field": "" }],
+        "final_urls": ["https://old.example.com"]
+      },
+      "draft": {
+        "headlines": [{ "text": "New H1", "pinned_field": "" }],
+        "descriptions": [{ "text": "New D1", "pinned_field": "" }],
+        "final_urls": ["https://new.example.com"]
+      },
+      "replace": true
+    },
+    "expected": {
+      "headline_count": 1,
+      "description_count": 1,
+      "final_urls": ["https://new.example.com"]
+    }
+  },
+  {
+    "id": "merge-draft-pin-wins-on-text-collision",
+    "type": "asset_merge",
+    "input": {
+      "existing": {
+        "headlines": [{ "text": "Shared headline", "pinned_field": "" }],
+        "descriptions": [],
+        "final_urls": []
+      },
+      "draft": {
+        "headlines": [{ "text": "Shared headline", "pinned_field": "HEADLINE_1" }],
+        "descriptions": [],
+        "final_urls": []
+      },
+      "replace": false
+    },
+    "expected": {
+      "headline_count": 1,
+      "description_count": 0,
+      "final_urls": []
+    }
   }
 ]
