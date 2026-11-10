@@ -1,5 +1,6 @@
 # Credentials & secrets — NEVER commit
 data/google-ads-adc-authorized-user.json
+data/google-ads-oauth-client.json
 data/google-ads-mcp.test.env.sh
 data/google-ads-mcp.openclaw.patch-example.json
 data/mcporter.google-ads-mcp.patch.json
@@ -25,6 +26,18 @@ APPLY-IMPLEMENTATION.md
 
 # Token caches
 /tmp/gads-copilot-token.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# MegaMemory transient sqlite files (knowledge.db itself is tracked for git sync)
+.megamemory/*.db-shm
+.megamemory/*.db-wal
+.megamemory/*.stale-*
+
+# Agent working notes (local only — repo is public)
+.opencode/plans/
 
 # Release artifacts
 dist/

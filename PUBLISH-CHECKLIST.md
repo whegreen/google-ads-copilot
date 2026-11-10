@@ -103,6 +103,31 @@ APPLY-IMPLEMENTATION.md  # Internal implementation notes
 .claude-plugin/          # Internal plugin config
 ```
 
+### MegaMemory knowledge graph (public by design — guard applies)
+
+`.megamemory/knowledge.db` **is tracked in git** so the knowledge graph syncs
+across machines. Because this repo is public, that database is public too.
+
+The `pre-push` hook blocks the push when the graph contains credential or
+known real-client patterns (the same list used in §2):
+
+- Credential markers: `GOCSPX-`, `refresh_token`, `client_secret`
+- Real-client identifiers: `East Coast Container`, `Cooper Recyc`, `Cooper Tank`,
+  `Allocco`, `coopertank.com`, `eastcoastcontainer`, `emerald-digital`
+- Real CIDs / phone numbers: `8468311086`, `9035206178`
+
+Before the first push of a session that recorded account work, run:
+
+```bash
+# Scan the graph for real-client / credential patterns
+megamemory conflicts --db .megamemory/knowledge.db   # also lists unresolved merges
+strings .megamemory/knowledge.db | grep -iE \
+  "GOCSPX-|refresh_token|client_secret|East Coast Container|Cooper Recyc|Cooper Tank|Allocco|coopertank\.com|eastcoastcontainer|emerald-digital|8468311086|9035206178"
+```
+
+An empty result means the graph is safe to publish. To push anyway (you have
+confirmed the match is a false positive): `SKIP_MEGAMEMORY=1 git push`.
+
 ---
 
 ## 4. Content Quality Pass
@@ -128,7 +153,18 @@ APPLY-IMPLEMENTATION.md  # Internal implementation notes
 
 ## 6. Pre-Commit Automation (Recommended)
 
-Add to `.git/hooks/pre-commit` or CI:
+A git hook is already wired up in this repo — `.githooks/` (enabled via
+`git config core.hooksPath .githooks`):
+
+- `.githooks/pre-push` — checkpoints the MegaMemory graph, blocks the push when
+  the graph still holds unresolved conflicts, and blocks the push when the graph
+  contains credential or real-client patterns (see §3). It commits only
+  `.megamemory/knowledge.db`, never other staged files.
+- `.githooks/post-merge` — advisory only: warns about graph conflicts and
+  quarantines stale WAL/SHM sidecars after a merge.
+
+To add the staged-file credential scan as well, extend `.githooks/pre-commit`:
+
 ```bash
 #!/bin/bash
 # Block commits containing likely credential patterns

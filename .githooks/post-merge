@@ -1,0 +1,46 @@
+#!/bin/bash
+# post-merge — deteksi konflik megamemory setelah git merge / rebase / cherry-pick.
+# Dipasang via `git config core.hooksPath .githooks`.
+# Advisory saja (exit 0) — tidak blokir merge, hanya warn bila needs_merge=1.
+# Bypass: SKIP_MEGAMEMORY=1
+# ponytail: 1 query sqlite <50ms, fail-safe. Ceiling: hanya deteksi, resolve
+# tetap via `megamemory conflicts` / `/merge`.
+set -uo pipefail
+
+[[ "${SKIP_MEGAMEMORY:-}" == "1" ]] && exit 0
+[[ -f .megamemory/knowledge.db ]] || exit 0
+
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# ponytail: node:sqlite (bawaan Node >=22), bukan `sqlite3` CLI yang tidak ada di image.
+MM_SQL="$PWD/scripts/hooks/mm-sql.mjs"
+[[ -f "$MM_SQL" ]] || exit 0
+
+CONFLICTS=$(node "$MM_SQL" query .megamemory/knowledge.db "SELECT COUNT(DISTINCT merge_group) FROM nodes WHERE needs_merge=1 AND merge_group IS NOT NULL;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+# fallback jika DISTINCT merge_group 0 tapi ada needs_merge tanpa group (edge only)
+if [[ "$CONFLICTS" == "0" ]]; then
+  CONFLICTS=$(node "$MM_SQL" query .megamemory/knowledge.db "SELECT COUNT(*) FROM nodes WHERE needs_merge=1;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+fi
+
+# trim whitespace
+CONFLICTS=$(echo "$CONFLICTS" | tr -d '[:space:]')
+[[ "$CONFLICTS" == "" ]] && CONFLICTS=0
+
+if [[ "$CONFLICTS" -gt 0 ]] 2>/dev/null; then
+  echo "post-merge: ⚠ megamemory memiliki $CONFLICTS konflik — jalankan 'megamemory conflicts' atau '/merge' untuk resolve" >&2
+  echo "post-merge:   verify file_refs terhadap codebase sebelum resolve_conflict (jangan asal pick side)" >&2
+fi
+
+# ponytail: guard integritas — repair dulu: kalau db tidak sehat karena WAL/SHM
+# basi hasil pull/merge yang menimpa knowledge.db, sidangkan sidecar-nya lalu
+# cek ulang ("healed"). Ceiling: kalau db-nya sendiri yang korup, hanya
+# dilaporkan → restore dari git.
+INTEGRITY=$(node "$MM_SQL" repair .megamemory/knowledge.db 2>/dev/null | tr -d '[:space:]' || echo bad)
+[[ "$INTEGRITY" == "" ]] && INTEGRITY=bad
+if [[ "$INTEGRITY" == "healed" ]]; then
+  echo "post-merge: ℹ WAL/SHM basi disidangkan (knowledge.db pulih) — restart opencode agar MCP megamemory buka db yang baru" >&2
+elif [[ "$INTEGRITY" != "ok" ]]; then
+  echo "post-merge: ⚠ knowledge.db korup/tidak sehat ($INTEGRITY) — restore versi sehat dari git (jangan push apa adanya)" >&2
+fi
+
+exit 0

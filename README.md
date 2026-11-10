@@ -137,6 +137,24 @@ Release bundles are built with `./scripts/package/build-release.sh <version>`.
 
 **See [DEMO-WORKFLOW.md](DEMO-WORKFLOW.md) for a guided walkthrough of the full cycle.**
 
+### Contributing
+
+This repo keeps a MegaMemory knowledge graph at `.megamemory/knowledge.db`
+(tracked in git, so the graph syncs across machines) and wires the sync through
+git hooks. Enable them once after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The `pre-push` hook checkpoints the graph, refuses to push while it still holds
+unresolved conflicts, and blocks the push if the graph contains credential or
+real-client patterns (this repo is public — see
+[PUBLISH-CHECKLIST.md](PUBLISH-CHECKLIST.md)). It needs Node 22+ (`node:sqlite`).
+
+Developers use `/develop-command` (or `/develop-plan` → `/develop-code`) for the
+structured refactor workflow: plan and lock scope first, then implement.
+
 **Environment variables:**
 | Variable | Required | Notes |
 |----------|----------|-------|

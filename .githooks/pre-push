@@ -1,0 +1,96 @@
+#!/bin/bash
+# pre-push — checkpoint megamemory WAL ke knowledge.db hanya saat push.
+# Dipasang via `git config core.hooksPath .githooks` (version-controlled, bukan
+# .git/hooks/ yang hilang saat re-clone).
+# Opsi A, hanya saat push: auto checkpoint + git add + commit [skip ci].
+# Bypass: git push --no-verify atau SKIP_MEGAMEMORY=1 git push.
+#
+# Kenapa pre-push, bukan pre-commit: knowledge.db ikut commit hanya bila
+# di-push (seamless ke mesin lain via git pull), bukan tiap commit lokal.
+# Ceiling: commit baru tidak ikut push pertama → perlu push kedua (sengaja exit 1).
+#
+# Diadaptasi dari merge-intools/scripts/hooks/pre-push.sh dengan 2 fix:
+#   1. Commit pakai pathspec `-- .megamemory/knowledge.db` — versi merge-intools
+#      memakai `git commit -m ...` tanpa pathspec, yang ikut membekukan SEMUA file
+#      staged lain ke dalam commit "chore: sync megamemory". Pathspec commit
+#      hanya menyentuh knowledge.db; file lain tetap staged seperti sebelumnya.
+#   2.-git add dikondisikan: kalau DB belum pernah di-track, `git diff --quiet`
+#      selalu exit 0 (untracked file invisible ke git diff) sehingga hook jadi
+#      no-op selamanya. Di sini untracked = perlu di-add.
+set -uo pipefail
+
+# ponytail: chain LFS dulu bila ada, agar postinstall tidak menimpa hook LFS.
+if command -v git-lfs >/dev/null 2>&1; then
+  git lfs pre-push "$@" || exit $?
+fi
+
+[[ "${SKIP_MEGAMEMORY:-}" == "1" ]] && exit 0
+[[ -f .megamemory/knowledge.db ]] || exit 0
+
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# ponytail: pakai node:sqlite, bukan `sqlite3` CLI — binary itu tidak ada di
+# image devcontainer, jadi hook lama selalu early-exit dan WAL tak pernah
+# di-checkpoint sebelum db di-commit (penyebab knowledge.db korup). Node >=22
+# dependency sudah ada.
+MM_SQL="$PWD/scripts/hooks/mm-sql.mjs"
+[[ -f "$MM_SQL" ]] || exit 0
+
+# ponytail: guard integritas DULU, baru checkpoint. checkpoint buka db writable;
+# kalau state-nya tidak sehat (WAL basi dari pull/checkout yang menimpa
+# knowledge.db) buka writable justru menulis ulang db dan merusaknya
+# (insiden 2026-10-19). repair = sidangkan WAL/SHM basi, cek ulang, semua
+# read-only. Fail-open: push tetap lanjut, hanya auto-commit db dilewati.
+INTEGRITY=$(node "$MM_SQL" repair .megamemory/knowledge.db 2>/dev/null | tr -d '[:space:]' || echo bad)
+[[ "$INTEGRITY" == "" ]] && INTEGRITY=bad
+if [[ "$INTEGRITY" == "healed" ]]; then
+  echo "pre-push: ℹ WAL/SHM basi disidangkan (knowledge.db pulih) — restart opencode agar MCP megamemory buka db baru" >&2
+elif [[ "$INTEGRITY" != "ok" ]]; then
+  echo "pre-push: ⚠ knowledge.db korup/tidak sehat ($INTEGRITY) — auto-commit db DILEWATI (push tetap lanjut)" >&2
+  echo "pre-push:   pulihkan: git log -- .megamemory/knowledge.db → git show <rev>:.megamemory/knowledge.db > .megamemory/knowledge.db" >&2
+  echo "pre-push:   wajib lanjut: rm -f .megamemory/knowledge.db-wal .megamemory/knowledge.db-shm  # WAL basi = 'database disk image is malformed'" >&2
+  exit 0
+fi
+
+# checkpoint WAL → db ( <100ms, fail-safe)
+node "$MM_SQL" checkpoint .megamemory/knowledge.db >/dev/null 2>&1 || true
+
+# ponytail: guard — jangan push DB yang masih konflik (needs_merge=1).
+# Ceiling: blokir push, user harus resolve via `npx megamemory conflicts` / `/merge` dulu.
+CONFLICTS=$(node "$MM_SQL" query .megamemory/knowledge.db "SELECT COUNT(*) FROM nodes WHERE needs_merge=1;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+[[ "$CONFLICTS" == "" ]] && CONFLICTS=0
+if [[ "$CONFLICTS" -gt 0 ]] 2>/dev/null; then
+  echo "pre-push: ✗ megamemory masih memiliki $CONFLICTS konflik — resolve dulu: npx megamemory conflicts atau /merge" >&2
+  echo "pre-push:   (bypass: SKIP_MEGAMEMORY=1 git push)" >&2
+  exit 1
+fi
+
+# ponytail: guard leak — repo ini PUBLIK. knowledge.db ikut commit ke repo
+# publik, jadi pola data klien nyata / kredensial dari PUBLISH-CHECKLIST.md
+# harus diblokir sebelum db masuk history.
+LEAK=$(node "$MM_SQL" query .megamemory/knowledge.db "SELECT COUNT(*) FROM nodes WHERE summary LIKE '%GOCSPX-%' OR summary LIKE '%refresh_token%' OR summary LIKE '%client_secret%' OR name LIKE '%GOCSPX-%' OR why LIKE '%GOCSPX-%' OR file_refs LIKE '%GOCSPX-%' OR summary LIKE '%East Coast Container%' OR summary LIKE '%Cooper Recyc%' OR summary LIKE '%Allocco%' OR summary LIKE '%coopertank.com%' OR summary LIKE '%emerald-digital%';" 2>/dev/null | tr -d '[:space:]' || echo 0)
+[[ "$LEAK" == "" ]] && LEAK=0
+if [[ "$LEAK" -gt 0 ]] 2>/dev/null; then
+  echo "pre-push: ✗ megamemory db memuat pola kredensial/data klien nyata — push DIBLOKIR" >&2
+  echo "pre-push:   repo ini publik; knowledge.db akan jadi publik juga" >&2
+  echo "pre-push:   bersihkan node terkait, atau bypass: SKIP_MEGAMEMORY=1 git push" >&2
+  exit 1
+fi
+
+# whether db has local changes (tracked) OR is not yet tracked at all
+TRACKED=$(git ls-files --error-unmatch .megamemory/knowledge.db >/dev/null 2>&1 && echo yes || echo no)
+if [[ "$TRACKED" == "yes" ]]; then
+  git diff --quiet -- .megamemory/knowledge.db && exit 0
+else
+  # belum pernah di-track: `git diff` tidak melihat untracked file, jadi DB
+  # baru tidak akan pernah ter-commit tanpa branch eksplisit ini.
+  git add .megamemory/knowledge.db
+fi
+
+# commit terpisah hanya knowledge.db — pathspec mencegah file staged lain
+# ikut ter-commit (fix vs merge-intools yang `git commit` polos).
+if git commit --no-verify -m "chore: sync megamemory [skip ci]" -- .megamemory/knowledge.db >/dev/null 2>&1; then
+  echo "pre-push: megamemory checkpointed & committed — jalankan git push sekali lagi" >&2
+  exit 1
+fi
+exit 0
