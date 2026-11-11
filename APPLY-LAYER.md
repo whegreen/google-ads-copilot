@@ -87,12 +87,26 @@ The live apply layer supports three bounded write categories:
 - **Two API calls:** `assets:mutate` creates the asset, `adGroupAssets:mutate` links it. If the link fails, the created asset id is kept in the reversal record so the orphan can be cleaned up.
 - **Undo:** Remove the ad group asset link
 
+### Action 6: Update Performance Max Asset Group Assets
+- **What:** Add, replace or unlink text assets (headlines, long headlines, descriptions) inside one Performance Max asset group
+- **How:** Only through an `## Apply Manifest` JSON block (schema v0.4)
+- **Why now:** The focused account is PMax-only — zero ad groups, zero responsive search ads. Without this action type every asset draft on this account would fail to resolve a target.
+- **Asset text is immutable:** changing a headline means creating a NEW asset and linking it. The old asset is unlinked, and with it its performance history. There is no "edit headline".
+- **One bulk request:** the API does not resolve a temporary resource name (`assets/-1`) across separate calls, so every create+link pair *and* every removal rides in ONE `googleAds:mutate` request. The removals come first so the slot-limit check sees the freed slots.
+- **Guardrails:**
+  - Blast-radius guard. The asset group is resolved by name inside the campaign, never by a raw id, and an ambiguous name is refused.
+  - Removal is explicit. `remove_assets` names the exact texts to unlink. The layer never picks an asset to drop on its own, and a removal needs `acknowledge_learning_period: true`.
+  - A removal that names an asset that is not live is an error (`remove_asset_not_found`), not a no-op.
+  - The same text may not be removed and added at once (`remove_and_add_same_text`).
+  - Local slot counts are **advisory**. The API's real ceiling for an asset group does not match the published caps and differs between asset groups of the same type — measured 16 headline links accepted in one asset group, 15 in another. The gate is the `validateOnly` request, which fails closed.
+- **Undo:** Unlink what the action added and re-create what it unlinked. **Performance history of unlinked assets is not recoverable** — the undo prints that warning.
+
 ### Explicitly NOT in Live Scope
 - ❌ Bid strategy changes
 - ❌ Shared budgets / portfolio budgets
 - ❌ Creating new campaigns or ad groups
 - ❌ Image / video assets (needs binary upload via `assets:mutate`)
-- ❌ PMax asset group changes (needs bulk `googleAds:mutate` with temporary IDs)
+- ❌ PMax image and video assets (only text assets are written)
 - ❌ Campaign-level or customer-level assets
 - ❌ Enabling paused entities
 - ❌ Deleting anything
@@ -200,6 +214,20 @@ So the apply layer treats asset changes as **snapshot + restore**:
 3. The undo output states plainly that performance history is not recoverable.
 
 This is the honest ceiling: the *content* is reversible, the *history* is not.
+
+### Performance Max asset groups reverse the same way, with one wrinkle
+
+An asset group holds *links* to assets, and the asset text is immutable. So the
+undo of an asset-group change is two-sided:
+
+1. The links the action **created** are unlinked.
+2. The assets the action **unlinked** are re-created with the same text and
+   linked again.
+
+Step 2 produces a *new* asset with a *new* id. The old asset — and the
+performance history it carried — stays unlinked. That is why the undo output
+says so explicitly, and why the reversal record stores both
+`addedAssets` and `removedAssets` instead of only a snapshot.
 
 ### How Undo Works
 

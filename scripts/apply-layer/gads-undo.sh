@@ -148,11 +148,23 @@ undo_single() {
     echo "  Budget (micros): ${after_micros} -> ${before_micros}"
   fi
   if [ "$snapshot" != "null" ] && [ -n "$snapshot" ]; then
-    local snap_hc snap_dc
-    snap_hc=$(echo "$snapshot" | jq '.headlines | length')
-    snap_dc=$(echo "$snapshot" | jq '.descriptions | length')
-    echo "  Asset snapshot:  ${snap_hc} headline(s), ${snap_dc} description(s) to restore"
-    echo -e "${DIM}  Performance history of assets removed since then is not recoverable.${NC}"
+    # Two snapshot shapes exist: an RSA snapshot (headlines/descriptions) and
+    # a Performance Max asset-group snapshot (HEADLINE/LONG_HEADLINE/DESCRIPTION).
+    if echo "$snapshot" | jq -e 'has("HEADLINE") or has("LONG_HEADLINE") or has("DESCRIPTION")' >/dev/null 2>&1; then
+      local snap_hc snap_lhc snap_dc
+      snap_hc=$(echo "$snapshot" | jq '.HEADLINE | length')
+      snap_lhc=$(echo "$snapshot" | jq '.LONG_HEADLINE | length')
+      snap_dc=$(echo "$snapshot" | jq '.DESCRIPTION | length')
+      echo "  Asset snapshot:  ${snap_hc} headline(s), ${snap_lhc} long headline(s), ${snap_dc} description(s) to restore"
+      echo -e "${DIM}  Performance history of unlinked assets is not recoverable.${NC}"
+      echo -e "${DIM}  Undo re-creates the text as a new asset — it does not restore the old link.${NC}"
+    else
+      local snap_hc snap_dc
+      snap_hc=$(echo "$snapshot" | jq '.headlines | length')
+      snap_dc=$(echo "$snapshot" | jq '.descriptions | length')
+      echo "  Asset snapshot:  ${snap_hc} headline(s), ${snap_dc} description(s) to restore"
+      echo -e "${DIM}  Performance history of assets removed since then is not recoverable.${NC}"
+    fi
   fi
   echo ""
 
@@ -240,6 +252,68 @@ undo_single() {
       ;;
     REMOVE_ADGROUP_ASSET)
       result=$(mutate_remove_adgroup_asset "$account_id" "$resource_name")
+      ;;
+    RESTORE_ASSET_GROUP_ASSETS)
+      # The asset group is restored by putting the links back the way they
+      # were: unlink what this action created, re-create what it unlinked.
+      # The text of a Performance Max asset is immutable, so a restored
+      # asset is a NEW asset with the same text — the performance history of
+      # the original stays with the removed link.
+      local ag_id live_now added_assets removed_assets snap_ag
+      local undo_plan undo_removals undo_restore ag_validate
+      ag_id="$resource_name"
+      if [ -z "$ag_id" ]; then
+        result='{"success": false, "error": "Missing asset group id for asset group reversal"}'
+      else
+        live_now=$(fetch_asset_group_assets "$account_id" "$ag_id")
+        added_assets=$(echo "$record" | jq -c '.addedAssets // []')
+        removed_assets=$(echo "$record" | jq -c '.removedAssets // []')
+        snap_ag=$(echo "$record" | jq -c '.snapshot // {}')
+
+        undo_plan=$(jq -n \
+          --argjson live "$live_now" \
+          --argjson added "$added_assets" \
+          --argjson removed "$removed_assets" \
+          --argjson snap "$snap_ag" '
+          def k($ft; $t): ($ft + "|" + $t);
+          ([
+             ($live.HEADLINE[]?      | {text: .text, field_type: "HEADLINE",      resource_name: .resource_name}),
+             ($live.LONG_HEADLINE[]? | {text: .text, field_type: "LONG_HEADLINE", resource_name: .resource_name}),
+             ($live.DESCRIPTION[]?   | {text: .text, field_type: "DESCRIPTION",   resource_name: .resource_name})
+           ]) as $flat
+          | ($added | map(k(.field_type; .text))) as $ak
+          | ([
+               ($snap.HEADLINE[]?      | k("HEADLINE"; .text)),
+               ($snap.LONG_HEADLINE[]? | k("LONG_HEADLINE"; .text)),
+               ($snap.DESCRIPTION[]?   | k("DESCRIPTION"; .text))
+             ]) as $sk
+          | {
+              # links this action created: live, listed as added, and not in
+              # the pre-change snapshot
+              removals: ($flat | map(select(
+                (k(.field_type; .text) as $x | ($ak | index($x)) != null)
+                and (k(.field_type; .text) as $y | ($sk | index($y)) == null)))),
+              # assets this action unlinked and that are not live again
+              restore: ($removed | map(select(
+                (k(.field_type; .text) as $x
+                 | ([$flat[] | select(k(.field_type; .text) == $x)] | length) == 0))))
+            }')
+
+        undo_removals=$(echo "$undo_plan" | jq -c '.removals')
+        undo_restore=$(echo "$undo_plan" | jq -c '.restore | map({field_type, text})')
+
+        if [ "$(echo "$undo_removals" | jq 'length')" -eq 0 ] && [ "$(echo "$undo_restore" | jq 'length')" -eq 0 ]; then
+          result='{"success": true, "operations": 0, "detail": "Nothing to restore — the asset group already matches the snapshot"}'
+        else
+          # Same gate as the write path: validate before touching the account.
+          ag_validate=$(mutate_asset_group_bulk "$account_id" "$ag_id" "$undo_restore" "$undo_removals" "true")
+          if [ "$(echo "$ag_validate" | jq -r '.success')" != "true" ]; then
+            result="$ag_validate"
+          else
+            result=$(mutate_asset_group_bulk "$account_id" "$ag_id" "$undo_restore" "$undo_removals" "false")
+          fi
+        fi
+      fi
       ;;
     *)
       result='{"success": false, "error": "Unknown reversal action: '"$reversal_action"'"}'

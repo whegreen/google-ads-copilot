@@ -73,9 +73,10 @@ _parse_apply_manifest() {
   fi
 
   # Validate minimal shape and reject unknown action types up front.
-  # v0.3 adds asset actions; v0.2 stays valid for budget-only drafts.
+  # v0.4 adds Performance Max asset-group writes; v0.3 adds asset actions;
+  # v0.2 stays valid for budget-only drafts.
   if ! echo "$manifest_json" | jq -e '
-    (.draft_version == "0.2" or .draft_version == "0.3")
+    (.draft_version == "0.2" or .draft_version == "0.3" or .draft_version == "0.4")
     and (.customer_id | type == "string")
     and (.actions | type == "array")
     and (.actions | length > 0)
@@ -86,10 +87,11 @@ _parse_apply_manifest() {
       "PAUSE_ADGROUP",
       "SET_CAMPAIGN_DAILY_BUDGET",
       "UPDATE_RSA_ASSETS",
-      "CREATE_ADGROUP_ASSET"
+      "CREATE_ADGROUP_ASSET",
+      "UPDATE_ASSET_GROUP_ASSETS"
     ] | index($t))
   ' >/dev/null 2>&1; then
-    echo "ERROR: Apply Manifest present but invalid (expected schema v0.2 or v0.3)" >&2
+    echo "ERROR: Apply Manifest present but invalid (expected schema v0.2, v0.3 or v0.4)" >&2
     return 1
   fi
 
@@ -105,6 +107,18 @@ _parse_apply_manifest() {
     fi
   done < <(echo "$manifest_json" | jq -c '.actions[] | select(.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET") | {type, adgroup: (.targets.adgroup_name // ""), guardrails: (.guardrails // {}), asset_headlines: (.targets.headlines // []), asset_descriptions: (.targets.descriptions // []), asset_final_urls: (.targets.final_urls // []), asset_replace: (.targets.replace // false), asset_type: (.targets.asset_type // ""), asset_link_text: (.targets.link_text // ""), asset_description_line_1: (.targets.description_line_1 // ""), asset_final_url: (.targets.final_url // ""), asset_start_date: (.targets.start_date // ""), asset_end_date: (.targets.end_date // ""), asset_text: (.targets.text // ""), asset_header: (.targets.header // ""), asset_values: (.targets.values // [])}' | while IFS= read -r a; do
     asset_validate_action "$a"
+  done)
+
+  # Performance Max asset-group actions carry their own rules: an explicit
+  # asset group, per-field-type length limits, no duplicate text, and an
+  # explicit acknowledgement before any removal.
+  while IFS= read -r asset_err; do
+    if [ -n "$asset_err" ]; then
+      echo "ERROR: Apply Manifest asset group action failed pre-flight validation: ${asset_err}" >&2
+      return 1
+    fi
+  done < <(echo "$manifest_json" | jq -c '.actions[] | select(.type == "UPDATE_ASSET_GROUP_ASSETS") | {type, asset_group_name: (.targets.asset_group_name // ""), asset_group_headlines: ((.targets.headlines // []) | map({text: .text})), asset_group_long_headlines: ((.targets.long_headlines // []) | map({text: .text})), asset_group_descriptions: ((.targets.descriptions // []) | map({text: .text})), asset_group_remove_assets: ((.targets.remove_assets // []) | map({text: .text, field_type: (.field_type // "")})), asset_group_replace: (.targets.replace // false), guardrails: (.guardrails // {})}' | while IFS= read -r a; do
+    asset_group_validate_action "$a"
   done)
 
   # Transform manifest actions into the legacy apply-layer action shape.
@@ -145,16 +159,19 @@ _parse_apply_manifest() {
                     if $a.type == "SET_CAMPAIGN_DAILY_BUDGET" then ""
                     elif $a.type == "PAUSE_ADGROUP" then (req_str($a; ["targets","adgroup_name"]))
                     elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then ""
+                    elif $a.type == "UPDATE_ASSET_GROUP_ASSETS" then ""
                     else (req_str($a; ["targets","keyword_text"])) end
                   ),
                   match_type: (
                     if $a.type == "SET_CAMPAIGN_DAILY_BUDGET" or $a.type == "PAUSE_ADGROUP" then "N/A"
                     elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then "N/A"
+                    elif $a.type == "UPDATE_ASSET_GROUP_ASSETS" then "N/A"
                     else (upcase(req_str($a; ["targets","match_type"]))) end
                   ),
                   scope: (
                     if $a.type == "ADD_NEGATIVE_ADGROUP" or $a.type == "PAUSE_KEYWORD" then "AD_GROUP"
                     elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then "AD_GROUP"
+                    elif $a.type == "UPDATE_ASSET_GROUP_ASSETS" then "ASSET_GROUP"
                     else "CAMPAIGN" end
                   ),
                   campaign: (
@@ -163,6 +180,7 @@ _parse_apply_manifest() {
                   adgroup: (
                     if $a.type == "ADD_NEGATIVE_ADGROUP" or $a.type == "PAUSE_KEYWORD" or $a.type == "PAUSE_ADGROUP" then (req_str($a; ["targets","adgroup_name"]))
                     elif $a.type == "UPDATE_RSA_ASSETS" or $a.type == "CREATE_ADGROUP_ASSET" then (req_str($a; ["targets","adgroup_name"]))
+                    elif $a.type == "UPDATE_ASSET_GROUP_ASSETS" then ""
                     else null end
                   ),
                   reason: ($a.reason // ""),
@@ -229,6 +247,32 @@ _parse_apply_manifest() {
                   ),
                   asset_values: (
                     if $a.type == "CREATE_ADGROUP_ASSET" then ($a.targets.values // [])
+                    else null end
+                  ),
+
+                  # ── v5 Performance Max asset group actions ──
+                  asset_group_name: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (req_str($a; ["targets","asset_group_name"]))
+                    else null end
+                  ),
+                  asset_group_headlines: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (($a.targets.headlines // []) | map({text: .text}))
+                    else null end
+                  ),
+                  asset_group_long_headlines: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (($a.targets.long_headlines // []) | map({text: .text}))
+                    else null end
+                  ),
+                  asset_group_descriptions: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (($a.targets.descriptions // []) | map({text: .text}))
+                    else null end
+                  ),
+                  asset_group_remove_assets: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (($a.targets.remove_assets // []) | map({text: .text, field_type: (.field_type // "")}))
+                    else null end
+                  ),
+                  asset_group_replace: (
+                    if $a.type == "UPDATE_ASSET_GROUP_ASSETS" then (($a.targets.replace // false) == true)
                     else null end
                   )
                 }

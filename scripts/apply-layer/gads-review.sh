@@ -164,6 +164,7 @@ review_draft() {
   pause_ag_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "PAUSE_ADGROUP")] | length')
   rsa_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "UPDATE_RSA_ASSETS")] | length')
   asset_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "CREATE_ADGROUP_ASSET")] | length')
+  ag_count=$(echo "$parsed" | jq '[.actions[] | select(.type == "UPDATE_ASSET_GROUP_ASSETS")] | length')
 
   echo -e "  ${CYAN}Action Breakdown:${NC}"
   [ "$neg_count" -gt 0 ] && echo -e "    📎 ${neg_count} negative keyword addition(s)  ${DIM}— Risk: Low${NC}"
@@ -171,6 +172,7 @@ review_draft() {
   [ "$pause_ag_count" -gt 0 ] && echo -e "    ⏸️  ${pause_ag_count} ad group pause(s)             ${DIM}— Risk: Medium${NC}"
   [ "$rsa_count" -gt 0 ] && echo -e "    🎯 ${rsa_count} RSA asset update(s)                ${DIM}— Risk: Medium${NC}"
   [ "$asset_count" -gt 0 ] && echo -e "    🔗 ${asset_count} extension asset(s)               ${DIM}— Risk: Low${NC}"
+  [ "$ag_count" -gt 0 ] && echo -e "    🎯 ${ag_count} PMax asset group update(s)         ${DIM}— Risk: Medium${NC}"
   echo ""
 
   # Show each action
@@ -192,6 +194,7 @@ review_draft() {
       PAUSE_ADGROUP)       icon="⏸️ " ;;
       UPDATE_RSA_ASSETS)   icon="🎯" ;;
       CREATE_ADGROUP_ASSET) icon="🔗" ;;
+      UPDATE_ASSET_GROUP_ASSETS) icon="🎯" ;;
     esac
 
     if [ "$action_type" = "UPDATE_RSA_ASSETS" ]; then
@@ -205,6 +208,16 @@ review_draft() {
       local atype
       atype=$(echo "$action" | jq -r '.asset_type')
       printf "    %s %-3d %-20s %s in \"%s\"\n" "$icon" "$((i + 1))" "$action_type" "$atype" "$adgroup"
+    elif [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+      local ag_name h_count lh_count d_count rm_count
+      ag_name=$(echo "$action" | jq -r '.asset_group_name')
+      h_count=$(echo "$action" | jq '.asset_group_headlines | length')
+      lh_count=$(echo "$action" | jq '.asset_group_long_headlines | length')
+      d_count=$(echo "$action" | jq '.asset_group_descriptions | length')
+      rm_count=$(echo "$action" | jq '.asset_group_remove_assets | length')
+      printf "    %s %-3d %-20s %sH/%sLH/%sD in \"%s\"" "$icon" "$((i + 1))" "$action_type" "$h_count" "$lh_count" "$d_count" "$ag_name"
+      [ "$rm_count" -gt 0 ] && printf " [-%s REMOVED]" "$rm_count"
+      printf "\n"
     else
       printf "    %s %-3d %-20s \"%-25s [%s]\n" "$icon" "$((i + 1))" "$action_type" "${keyword}\"" "$match_type"
     fi

@@ -88,10 +88,13 @@ SUBST = {
     "${match_type}": "EXACT",
     "${safe_campaign}": "High Intent - Search",
     "${safe_adgroup}": "Crane Rental",
+    "${safe_ag}": "at home daycare feb",
+    "${safe_name}": "High Intent - Search",
     "${safe_keyword}": "near me",
     "${ad_id}": "555",
     "${asset_id}": "999",
     "${customer_id}": CID,
+    "${asset_group_id}": "6677194808",
     "${safe}": "x",
 }
 
@@ -107,9 +110,6 @@ def is_query(text: str) -> bool:
         return False
     # A query needs a FROM clause; prose that merely mentions SELECT does not.
     if " FROM " not in t.upper():
-        return False
-    # f-string templates carry unresolved braces — they cannot be evaluated.
-    if "{" in t or "}" in t:
         return False
     return True
 
@@ -144,6 +144,11 @@ for src, q in uniq:
     q2 = substitute(q)
     if "${" in q2:
         print(f"⏭️  {src}  (unresolved placeholder — skipped)\n")
+        continue
+    # A leftover brace means the blob is a Python f-string template: it was
+    # never a runnable query, so it must not reach the API.
+    if "{" in q2 or "}" in q2:
+        print(f"⏭️  {src}  (template, not a runnable query — skipped)\n")
         continue
     status, n = run(q2)
     label = q2[:96] + ("…" if len(q2) > 96 else "")

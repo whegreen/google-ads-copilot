@@ -25,10 +25,11 @@ Apply-layer parsing rules:
 - If no manifest is present, apply falls back to legacy v1 markdown parsing (negatives + pauses).
 - If a manifest is present but invalid, apply MUST fail closed.
 
-## Schema (v0.3)
+## Schema (v0.4)
 
 Top-level object:
-- `draft_version` (required): `"0.3"`
+- `draft_version` (required): `"0.4"`
+  - `"0.3"` is still accepted (RSA + extension assets).
   - `"0.2"` is still accepted for budget-only drafts (no asset actions).
 - `customer_id` (required): 10-digit string
 - `customer_name` (optional): string
@@ -126,11 +127,65 @@ Creates an extension asset and links it to one ad group.
 Sitelinks need both `start_date` and `end_date` to serve. Without a start
 date the asset is created but never eligible.
 
+### v5 Apply Types (Performance Max asset groups)
+
+#### `UPDATE_ASSET_GROUP_ASSETS`
+Adds, replaces or unlinks text assets in one Performance Max asset group.
+
+A Performance Max campaign carries **asset groups**, not ad groups. The asset
+group is what holds the final URL and the linked assets, so it is the PMax
+equivalent of an ad group.
+
+- `targets`:
+  - `campaign_name` (string, required)
+  - `asset_group_name` (string, required) — resolved by name inside the
+    campaign, never by a raw id, so a typo cannot hit an unrelated asset group
+  - `headlines` (array, optional): `{ "text": string }`
+    - `text` ≤ 30 characters
+  - `long_headlines` (array, optional): `{ "text": string }`
+    - `text` ≤ 90 characters
+  - `descriptions` (array, optional): `{ "text": string }`
+    - `text` ≤ 90 characters
+  - `remove_assets` (array, optional): `{ "text": string, "field_type": string }`
+    - `field_type` ∈ `HEADLINE` \| `LONG_HEADLINE` \| `DESCRIPTION`
+    - **Every entry names one exact live asset.** There is no auto-pick: the
+      apply layer never decides on its own which asset to drop.
+  - `replace` (boolean, default false)
+    - `false` → merge with the assets already live (new assets only)
+    - `true` → the lists in this action ARE the final list (other live assets
+      are unlinked)
+- `guardrails`:
+  - `acknowledge_learning_period` (boolean, default false) — must be `true`
+    when `remove_assets` is not empty
+  - `max_assets_per_draft` (integer, default 10) — total asset count across
+    the draft
+
+**Why removals must be explicit.** Unlinking an asset destroys its
+performance history, and the snapshot reversal only restores the *text*, not
+the history. Picking the victim automatically would hide that decision inside
+the tooling, so the draft has to name the asset and acknowledge the cost.
+
+**Why the same text may not be removed and added at once.** The asset group's
+text is immutable, so a "changed" asset is a new asset plus an unlink. A
+draft that removes and re-adds the same text is contradictory and is rejected
+(`remove_and_add_same_text`).
+
+**How the write is executed.** One bulk `googleAds:mutate` request carries the
+removals *and* the create+link of every new asset. The API does not resolve a
+temporary resource name (`assets/-1`) across separate calls, and the slot
+limit check has to see the removals to free the slots.
+
+**How the limits are enforced.** The local slot count is **advisory only** —
+the API's real ceiling for an asset group does not match the published caps
+and differs between asset groups of the same type. The gate is the
+`validateOnly` request the apply layer sends before every write: it fails
+closed if the account rejects the change.
+
 ## Example (RSA Asset Refresh)
 
 ```json
 {
-  "draft_version": "0.3",
+  "draft_version": "0.4",
   "customer_id": "1234567890",
   "meta": {
     "budget_policy": {
@@ -184,11 +239,52 @@ date the asset is created but never eligible.
 }
 ```
 
+## Example (Performance Max Asset Group Fill)
+
+```json
+{
+  "draft_version": "0.4",
+  "customer_id": "1234567890",
+  "meta": {
+    "budget_policy": {
+      "allow_net_increase": false,
+      "max_net_increase_pct": 10
+    }
+  },
+  "actions": [
+    {
+      "id": "ag-headlines",
+      "type": "UPDATE_ASSET_GROUP_ASSETS",
+      "risk": "medium",
+      "reason": "Fill 7 empty headline slots with catalogue coverage.",
+      "targets": {
+        "campaign_name": "tes 2",
+        "asset_group_name": "at home daycare feb",
+        "headlines": [
+          { "text": "Daily Drop-off Bayi & Toddler" },
+          { "text": "After School Daycare" }
+        ],
+        "long_headlines": [
+          { "text": "Kurikulum Kisah Tumbuh + CCTV" }
+        ],
+        "descriptions": [],
+        "remove_assets": [],
+        "replace": false
+      },
+      "guardrails": {
+        "acknowledge_learning_period": true,
+        "max_assets_per_draft": 20
+      }
+    }
+  ]
+}
+```
+
 ## Example (Budget Reallocation)
 
 ```json
 {
-  "draft_version": "0.3",
+  "draft_version": "0.4",
   "customer_id": "1234567890",
   "meta": {
     "budget_policy": {

@@ -344,4 +344,78 @@ assert_contains "$UNDO_OUT" 'Existing Headline One'
 assert_contains "$UNDO_OUT" '"pinnedField": "HEADLINE_1"'
 assert_contains "$UNDO_OUT" '"status": "undone"'
 
+# ─── Performance Max asset group rules (v5) ───────────────────
+# The asset-group rules are pure logic too: no API calls. They decide whether
+# a Performance Max draft is safe to send before anything reaches the account.
+
+asset_group_rules() {
+  # $1 = function name, rest = JSON arguments (passed via env to survive quoting).
+  local fn="$1"
+  shift
+  local args=""
+  local i=0
+  for arg in "$@"; do
+    i=$((i + 1))
+    export "ARG$i=$arg"
+    args="$args \"\$ARG$i\""
+  done
+  bash -c "cd '$ROOT' && source scripts/apply-layer/lib/asset-rules.sh && $fn$args"
+}
+
+assert_eq "asset group must be named" "asset_group_not_explicit" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"","asset_group_headlines":[{"text":"H"}]}')"
+assert_eq "asset group removal needs acknowledgement" "removal_not_acknowledged" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"AG","asset_group_remove_assets":[{"text":"Old","field_type":"HEADLINE"}]}')"
+assert_eq "asset group removal field type must be known" "remove_field_type_invalid" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"AG","guardrails":{"acknowledge_learning_period":true},"asset_group_remove_assets":[{"text":"Old","field_type":"BANNER"}]}')"
+assert_eq "asset group duplicate text blocked" "duplicate_asset_text" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"AG","asset_group_headlines":[{"text":"A"},{"text":"A"}]}')"
+assert_eq "asset group empty draft blocked" "no_asset_changes" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"AG"}')"
+assert_eq "asset group valid action passes" "" \
+  "$(asset_group_rules asset_group_validate_action '{"type":"UPDATE_ASSET_GROUP_ASSETS","asset_group_name":"AG","asset_group_headlines":[{"text":"On-Demand Babysitter"}]}')"
+
+# A removal that names an asset that is not live is a typo, not a no-op.
+assert_eq "asset group removal of a missing asset blocked" "remove_asset_not_found" \
+  "$(asset_group_rules asset_group_validate_removals '[{"text":"Never Linked","field_type":"HEADLINE"}]' '{"HEADLINE":[{"text":"Live One"}],"LONG_HEADLINE":[],"DESCRIPTION":[]}')"
+
+# The asset-group draft parses into the manifest action shape.
+PARSED_AG=$(bash -c "cd '$ROOT' && source scripts/apply-layer/lib/parse-draft.sh && parse_draft '$ROOT/evals/fixtures/draft-asset-group-manifest.md'")
+assert_eq "asset group draft parses" "1" "$(echo "$PARSED_AG" | jq '.action_count')"
+assert_eq "asset group draft action type" "UPDATE_ASSET_GROUP_ASSETS" "$(echo "$PARSED_AG" | jq -r '.actions[0].type')"
+assert_eq "asset group draft scope" "ASSET_GROUP" "$(echo "$PARSED_AG" | jq -r '.actions[0].scope')"
+assert_eq "asset group draft keeps the asset group name" "at home daycare feb" "$(echo "$PARSED_AG" | jq -r '.actions[0].asset_group_name')"
+assert_eq "asset group draft keeps the headlines" "2" "$(echo "$PARSED_AG" | jq '.actions[0].asset_group_headlines | length')"
+
+# ─── Offline preview of the Performance Max asset group flow ─
+# Runs the real gads-apply.sh against a stubbed API: parse → resolve → merge →
+# validate_only → execute → verify → audit, then undoes it. No live account.
+AG_PREVIEW_OUT="$TMP_DIR/asset-group-preview.out"
+bash "$ROOT/scripts/apply-layer/preview-asset-group-apply.sh" "$ROOT/evals/fixtures/draft-asset-group-manifest.md" > "$AG_PREVIEW_OUT" 2>&1
+
+assert_contains "$AG_PREVIEW_OUT" 'Executed:  1 succeeded, 0 failed'
+assert_contains "$AG_PREVIEW_OUT" 'Verified:  1 confirmed, 0 unconfirmed'
+assert_contains "$AG_PREVIEW_OUT" '"reversalAction": "RESTORE_ASSET_GROUP_ASSETS"'
+# The reversal record must name what was added — that is what undo needs.
+assert_contains "$AG_PREVIEW_OUT" 'On-Demand Babysitter'
+# After the undo the asset group is back to its pre-change list.
+assert_contains "$AG_PREVIEW_OUT" 'HEADLINE: 3 linked'
+assert_contains "$AG_PREVIEW_OUT" 'Daycare Services'
+
+# The removal path must unlink only the assets the draft names.
+AG_REMOVAL_OUT="$TMP_DIR/asset-group-removal.out"
+bash "$ROOT/scripts/apply-layer/preview-asset-group-apply.sh" "$ROOT/evals/fixtures/draft-asset-group-removal.md" > "$AG_REMOVAL_OUT" 2>&1
+
+assert_contains "$AG_REMOVAL_OUT" '"remove": "customers/1234567890/assetGroupAssets/6677194808~5002~HEADLINE"'
+assert_contains "$AG_REMOVAL_OUT" '"remove": "customers/1234567890/assetGroupAssets/6677194808~5003~HEADLINE"'
+assert_contains "$AG_REMOVAL_OUT" 'Verified:  1 confirmed, 0 unconfirmed'
+
+# The preview must not touch the real workspace.
+if [ -f "$ROOT/workspace/ads/audit-trail/reversal-registry.json" ]; then
+  if grep -q '"RESTORE_ASSET_GROUP_ASSETS"' "$ROOT/workspace/ads/audit-trail/reversal-registry.json" 2>/dev/null; then
+    echo "Preview leaked an asset group reversal record into the real workspace" >&2
+    exit 1
+  fi
+fi
+
 echo "Shell regression checks passed."

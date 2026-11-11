@@ -231,6 +231,30 @@ def _run_asset_rules(func: str, arg: str) -> str:
     return proc.stdout.strip()
 
 
+def _run_asset_group_rules(func: str, *args: str) -> str:
+    """Call a function in lib/asset-rules.sh with several JSON arguments.
+
+    Same principle as _run_asset_rules: the shell library is the source of
+    truth for asset rules, so the eval suite exercises it directly instead of
+    reimplementing the logic in Python.
+    """
+    env_args = {f"ARG{i}": a for i, a in enumerate(args)}
+    refs = " ".join(f'"$ARG{i}"' for i in range(len(args)))
+    cmd = (
+        f'cd "{ROOT}" && source scripts/apply-layer/lib/asset-rules.sh && '
+        f'{func} {refs}'
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_args},
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"{func} failed")
+    return proc.stdout.strip()
+
+
 def evaluate_apply_case(case):
     if case["type"] == "parser_fixture":
       parsed = _parse_draft_via_bash(FIXTURES / case["fixture"])
@@ -248,6 +272,51 @@ def evaluate_apply_case(case):
           json.dumps(case["input"]["action"]),
       )
       return {"valid": reason == "", "reason": reason}
+
+    if case["type"] == "asset_group_guardrail":
+      reason = _run_asset_rules(
+          "asset_group_validate_action",
+          json.dumps(case["input"]["action"]),
+      )
+      return {"valid": reason == "", "reason": reason}
+
+    if case["type"] == "asset_group_removal_check":
+      reason = _run_asset_group_rules(
+          "asset_group_validate_removals",
+          json.dumps(case["input"]["remove"]),
+          json.dumps(case["input"]["existing"]),
+      )
+      return {"valid": reason == "", "reason": reason}
+
+    if case["type"] == "asset_group_merge":
+      data = case["input"]
+      out = _run_asset_group_rules(
+          "asset_group_merge_lists",
+          json.dumps(data["existing"]),
+          json.dumps(data["draft"]),
+          json.dumps(data.get("remove", [])),
+          "true" if data.get("replace") else "false",
+      )
+      result = json.loads(out)
+      return {
+          "headline_count": len(result["HEADLINE"]),
+          "long_headline_count": len(result["LONG_HEADLINE"]),
+          "description_count": len(result["DESCRIPTION"]),
+          "removed_texts": sorted(r["text"] for r in result.get("removed", [])),
+      }
+
+    if case["type"] == "asset_group_slots":
+      out = _run_asset_group_rules(
+          "asset_group_slot_report",
+          json.dumps(case["input"]["merged"]),
+      )
+      report = json.loads(out)
+      return {
+          "headline_used": report["HEADLINE"]["used"],
+          "headline_over": report["HEADLINE"]["over"],
+          "description_used": report["DESCRIPTION"]["used"],
+          "description_over": report["DESCRIPTION"]["over"],
+      }
 
     if case["type"] == "asset_merged_guardrail":
       reason = _run_asset_rules(

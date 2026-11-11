@@ -41,6 +41,7 @@ NC='\033[0m'
 # ═══════════════════════════════════════════════════════════
 DRY_RUN_ONLY=false
 PARSE_ONLY=false
+VALIDATE_ONLY=false
 FORCE=false
 DRAFT_FILE=""
 
@@ -48,14 +49,16 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)    DRY_RUN_ONLY=true; shift ;;
     --parse-only) PARSE_ONLY=true; shift ;;
+    --validate-only) VALIDATE_ONLY=true; shift ;;
     --force)      FORCE=true; shift ;;
     -h|--help)
-      echo "Usage: gads-apply.sh [--dry-run|--parse-only] <draft-file>"
+      echo "Usage: gads-apply.sh [--dry-run|--parse-only|--validate-only] <draft-file>"
       echo ""
       echo "Options:"
-      echo "  --dry-run      Show what would change without executing"
-      echo "  --parse-only   Parse the draft to JSON and exit"
-      echo "  --force        Override certain safety blocks (v2: budget cooldown only)"
+      echo "  --dry-run       Show what would change without executing"
+      echo "  --parse-only    Parse the draft to JSON and exit"
+      echo "  --validate-only Run the draft against the live account with validateOnly (no changes)"
+      echo "  --force         Override certain safety blocks (v2: budget cooldown only)"
       echo ""
       echo "The draft file should be a markdown file from workspace/ads/drafts/"
       echo ""
@@ -455,6 +458,130 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
     echo -e "  ✅ Asset type: ${asset_type} → ad group \"${adgroup_name}\""
   fi
 
+  # ─── Performance Max asset group actions (v5) ───
+  # A Performance Max campaign carries asset groups, not ad groups. The draft
+  # names the asset group and the layer resolves it by name inside the
+  # campaign — never by a raw id — so a typo cannot hit an unrelated group.
+  if [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+    asset_group_name=$(echo "$action" | jq -r '.asset_group_name // empty')
+
+    if [ -z "$asset_group_name" ]; then
+      echo -e "  ${RED}❌ Asset group action must name an asset group${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Asset group not named in draft"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    ag_list=$(lookup_asset_group "$CUSTOMER_ID" "$campaign_name" "$asset_group_name")
+    ag_count=$(echo "$ag_list" | jq 'length' 2>/dev/null || echo 0)
+
+    if [ "$ag_count" -eq 0 ]; then
+      echo -e "  ${RED}❌ Asset group not found: \"${asset_group_name}\" in \"${campaign_name}\"${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Asset group not found"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    if [ "$ag_count" -gt 1 ]; then
+      echo -e "  ${RED}❌ Asset group name \"${asset_group_name}\" is not unique in \"${campaign_name}\"${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "Asset group name is not unique"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    asset_group_id=$(echo "$ag_list" | jq -r '.[0].asset_group_id')
+    echo -e "  ✅ Asset group: \"${asset_group_name}\" → ID ${asset_group_id}"
+
+    # Read what is live right now — the write is read-modify-write, and the
+    # snapshot taken here is what undo restores.
+    existing_ag=$(fetch_asset_group_assets "$CUSTOMER_ID" "$asset_group_id")
+
+    # Every asset named for removal must exist live. A removal that names
+    # nothing is a typo, not a no-op.
+    remove_list=$(echo "$action" | jq -c '.asset_group_remove_assets // []')
+    remove_err=$(asset_group_validate_removals "$remove_list" "$existing_ag")
+    if [ -n "$remove_err" ]; then
+      echo -e "  ${RED}❌ Removal target is not live: ${remove_err}${NC}"
+      action=$(echo "$action" | jq --arg msg "Removal target not live: $remove_err" '. + {valid: false, error: $msg}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    draft_lists=$(jq -n \
+      --argjson h "$(echo "$action" | jq -c '.asset_group_headlines // []')" \
+      --argjson l "$(echo "$action" | jq -c '.asset_group_long_headlines // []')" \
+      --argjson d "$(echo "$action" | jq -c '.asset_group_descriptions // []')" \
+      '{HEADLINE: $h, LONG_HEADLINE: $l, DESCRIPTION: $d}')
+
+    replace_flag=$(echo "$action" | jq -r '.asset_group_replace // false')
+    merged_ag=$(asset_group_merge_lists "$existing_ag" "$draft_lists" "$remove_list" "$replace_flag")
+
+    # What has to be created: merged entries whose text is not live yet.
+    additions=$(jq -n --argjson merged "$merged_ag" --argjson existing "$existing_ag" '
+      (
+        (($merged.HEADLINE // [])
+          | map(select((.text as $t | (($existing.HEADLINE // []) | map(.text) | index($t)) == null))
+                 | {field_type: "HEADLINE", text: .text}))
+        +
+        (($merged.LONG_HEADLINE // [])
+          | map(select((.text as $t | (($existing.LONG_HEADLINE // []) | map(.text) | index($t)) == null))
+                 | {field_type: "LONG_HEADLINE", text: .text}))
+        +
+        (($merged.DESCRIPTION // [])
+          | map(select((.text as $t | (($existing.DESCRIPTION // []) | map(.text) | index($t)) == null))
+                 | {field_type: "DESCRIPTION", text: .text}))
+      )')
+
+    # What has to be unlinked.
+    removals=$(echo "$merged_ag" | jq -c '[.removed[]? | {field_type, text, resource_name}]')
+
+    if [ "$(echo "$additions" | jq 'length')" -eq 0 ] && [ "$(echo "$removals" | jq 'length')" -eq 0 ]; then
+      echo -e "  ${YELLOW}⏭️  Every draft asset is already live — nothing to change${NC}"
+      action=$(echo "$action" | jq '. + {valid: false, error: "No asset changes (draft assets already live)"}')
+      VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      RESOLVED_ACTIONS=$(echo "$RESOLVED_ACTIONS" | jq --argjson a "$action" '. + [$a]')
+      continue
+    fi
+
+    slots=$(asset_group_slot_report "$merged_ag")
+
+    action=$(echo "$action" | jq \
+      --arg agid "$asset_group_id" \
+      --argjson merged "$merged_ag" \
+      --argjson existing "$existing_ag" \
+      --argjson additions "$additions" \
+      --argjson removals "$removals" \
+      --argjson slots "$slots" \
+      '. + {
+        asset_group_id: $agid,
+        asset_group_merged: $merged,
+        asset_group_snapshot: $existing,
+        asset_group_additions: $additions,
+        asset_group_removals: $removals,
+        asset_group_slots: $slots
+      }')
+
+    live_h=$(echo "$existing_ag" | jq '.HEADLINE | length')
+    live_lh=$(echo "$existing_ag" | jq '.LONG_HEADLINE | length')
+    live_d=$(echo "$existing_ag" | jq '.DESCRIPTION | length')
+    new_h=$(echo "$merged_ag" | jq '.HEADLINE | length')
+    new_lh=$(echo "$merged_ag" | jq '.LONG_HEADLINE | length')
+    new_d=$(echo "$merged_ag" | jq '.DESCRIPTION | length')
+    echo -e "  ✅ Assets: HEADLINE ${live_h}→${new_h}, LONG_HEADLINE ${live_lh}→${new_lh}, DESCRIPTION ${live_d}→${new_d}"
+
+    # The published caps do not match what the API enforces (measured on this
+    # account), so this is a warning for the operator, not a gate. The real
+    # gate is the validate_only request that runs before the write.
+    over_slots=$(echo "$slots" | jq -r '[to_entries[] | select(.value.over) | .key] | join(", ")')
+    if [ -n "$over_slots" ]; then
+      echo -e "  ${YELLOW}⚠️  Over the published cap on: ${over_slots} — the API decides, validate_only is the gate${NC}"
+    fi
+  fi
+
   # For ad group pause actions, resolve the ad group ID
   if [ "$action_type" = "PAUSE_ADGROUP" ]; then
     if [ -z "$adgroup_name" ]; then
@@ -478,7 +605,7 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
   fi
 
   case "$action_type" in
-    ADD_NEGATIVE|SET_CAMPAIGN_DAILY_BUDGET|PAUSE_KEYWORD|PAUSE_ADGROUP|UPDATE_RSA_ASSETS|CREATE_ADGROUP_ASSET)
+    ADD_NEGATIVE|SET_CAMPAIGN_DAILY_BUDGET|PAUSE_KEYWORD|PAUSE_ADGROUP|UPDATE_RSA_ASSETS|CREATE_ADGROUP_ASSET|UPDATE_ASSET_GROUP_ASSETS)
       ;;
     *)
       echo -e "  ${RED}❌ Unsupported action type: \"${action_type}\"${NC}"
@@ -532,9 +659,9 @@ if [ "$VALID_BUDGET_COUNT" -gt 0 ]; then
 fi
 
 # Asset guardrail: total headline+description count across the draft.
-ASSET_ACTION_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET"))] | length')
+ASSET_ACTION_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET" or .type == "UPDATE_ASSET_GROUP_ASSETS"))] | length')
 if [ "$ASSET_ACTION_COUNT" -gt 0 ]; then
-  count_err=$(asset_validate_draft_count "$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET"))]')")
+  count_err=$(asset_validate_draft_count "$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and (.type == "UPDATE_RSA_ASSETS" or .type == "CREATE_ADGROUP_ASSET" or .type == "UPDATE_ASSET_GROUP_ASSETS"))]')")
   if [ -n "$count_err" ]; then
     echo ""
     echo -e "${RED}ERROR: Asset draft exceeds max_assets_per_draft (${count_err}).${NC}"
@@ -610,6 +737,14 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       display_target="AG: ${adgroup}"
       display_detail=$(echo "$action" | jq -r '.asset_type')
       ;;
+    UPDATE_ASSET_GROUP_ASSETS)
+      display_type="PMX ASSETS"
+      display_target="AG: $(echo "$action" | jq -r '.asset_group_name')"
+      add_n=$(echo "$action" | jq '.asset_group_additions | length')
+      rem_n=$(echo "$action" | jq '.asset_group_removals | length')
+      display_detail="+${add_n}/-${rem_n}"
+      display_risk="Medium"
+      ;;
   esac
 
   if [ "$valid" = "false" ]; then
@@ -630,6 +765,7 @@ PAUSE_KW_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and
 PAUSE_AG_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "PAUSE_ADGROUP")] | length')
 RSA_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "UPDATE_RSA_ASSETS")] | length')
 ASSET_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "CREATE_ADGROUP_ASSET")] | length')
+AG_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == true and .type == "UPDATE_ASSET_GROUP_ASSETS")] | length')
 SKIP_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == false)] | length')
 
 [ "$NEG_COUNT" -gt 0 ] && echo -e "  • ${NEG_COUNT} negative keyword addition(s)"
@@ -638,21 +774,30 @@ SKIP_COUNT=$(echo "$RESOLVED_ACTIONS" | jq '[.[] | select(.valid == false)] | le
 [ "$PAUSE_AG_COUNT" -gt 0 ] && echo -e "  • ${PAUSE_AG_COUNT} ad group pause(s)"
 [ "$RSA_COUNT" -gt 0 ] && echo -e "  • ${RSA_COUNT} RSA asset update(s)"
 [ "$ASSET_COUNT" -gt 0 ] && echo -e "  • ${ASSET_COUNT} extension asset(s)"
+[ "$AG_COUNT" -gt 0 ] && echo -e "  • ${AG_COUNT} Performance Max asset group update(s)"
 [ "$SKIP_COUNT" -gt 0 ] && echo -e "  • ${YELLOW}${SKIP_COUNT} skipped (validation errors)${NC}"
 
-if [ "$RSA_COUNT" -gt 0 ]; then
+if [ "$RSA_COUNT" -gt 0 ] || [ "$AG_COUNT" -gt 0 ]; then
   echo -e "  • Reversibility: ${GREEN}Assets restorable from snapshot${NC} ${DIM}(performance history of removed assets is not recoverable)${NC}"
 else
   echo -e "  • Reversibility: ${GREEN}All actions reversible${NC}"
 fi
 
-# Learning-period warning for RSA asset changes. Adding assets resets ad
+# Learning-period warning for asset changes. Adding assets resets ad
 # strength — CTR can dip for a week or two before the new mix settles.
 if [ "$RSA_COUNT" -gt 0 ]; then
   echo ""
   echo -e "${YELLOW}⚠️  RSA asset changes affect live ads.${NC}"
   echo -e "${YELLOW}   New assets start a learning period — expect a temporary CTR dip.${NC}"
   echo -e "${YELLOW}   Removed assets lose their performance history and cannot get it back.${NC}"
+fi
+
+if [ "$AG_COUNT" -gt 0 ]; then
+  echo ""
+  echo -e "${YELLOW}⚠️  Performance Max asset changes affect live ads.${NC}"
+  echo -e "${YELLOW}   New assets start a learning period — expect a temporary CTR dip.${NC}"
+  echo -e "${YELLOW}   Unlinked assets lose their performance history and cannot get it back.${NC}"
+  echo -e "${YELLOW}   Restoring them re-creates the text, not the history.${NC}"
 fi
 
 if [ "$BDG_COUNT" -gt 0 ]; then
@@ -670,6 +815,64 @@ fi
 if [ "$VALIDATION_ERRORS" -gt 0 ]; then
   echo ""
   echo -e "${YELLOW}⚠️  ${VALIDATION_ERRORS} action(s) will be skipped due to validation errors.${NC}"
+fi
+
+# ─── Server-side validation (no changes) ───
+# validateOnly asks the API to run every check it would run on a real write
+# — slot limits, duplicate rules, link validity — and change nothing. This is
+# the only gate that knows the account's real limits, so it runs before any
+# write, and it can also be run on its own with --validate-only.
+if $VALIDATE_ONLY; then
+  echo ""
+  echo -e "${BLUE}Server-side validation (validateOnly — no changes are made)${NC}"
+
+  VALIDATE_FAILED=0
+  for i in $(seq 0 $((ACTION_COUNT - 1))); do
+    action=$(echo "$RESOLVED_ACTIONS" | jq ".[$i]")
+    [ "$(echo "$action" | jq -r '.valid')" = "false" ] && continue
+
+    action_type=$(echo "$action" | jq -r '.type')
+    action_index=$(echo "$action" | jq -r '.index')
+
+    case "$action_type" in
+      UPDATE_ASSET_GROUP_ASSETS)
+        validate_result=$(mutate_asset_group_bulk \
+          "$CUSTOMER_ID" \
+          "$(echo "$action" | jq -r '.asset_group_id')" \
+          "$(echo "$action" | jq -c '.asset_group_additions')" \
+          "$(echo "$action" | jq -c '.asset_group_removals')" \
+          "true")
+        ;;
+      UPDATE_RSA_ASSETS)
+        validate_result=$(mutate_update_rsa_assets \
+          "$CUSTOMER_ID" \
+          "$(echo "$action" | jq -r '.ad_id')" \
+          "$(echo "$action" | jq -c '.merged_headlines')" \
+          "$(echo "$action" | jq -c '.merged_descriptions')" \
+          "$(echo "$action" | jq -c '.merged_final_urls')" \
+          "true")
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    if [ "$(echo "$validate_result" | jq -r '.success')" != "true" ]; then
+      validate_error=$(echo "$validate_result" | jq -r '.error // "validation failed"')
+      echo -e "  ${RED}❌ [${action_index}] ${action_type}: ${validate_error}${NC}"
+      VALIDATE_FAILED=$((VALIDATE_FAILED + 1))
+    else
+      echo -e "  ${GREEN}✅ [${action_index}] ${action_type}: accepted by the live API${NC}"
+    fi
+  done
+
+  echo ""
+  if [ "$VALIDATE_FAILED" -gt 0 ]; then
+    echo -e "${RED}${VALIDATE_FAILED} action(s) were rejected by the live API. Nothing was changed.${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}All actions are accepted by the live API. Nothing was changed.${NC}"
+  exit 0
 fi
 
 echo ""
@@ -771,6 +974,8 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
 
   if [ "$action_type" = "SET_CAMPAIGN_DAILY_BUDGET" ]; then
     echo -n "  [${action_index}] ${action_type}: ${campaign_name} (${current_budget}->${proposed_budget}) ... "
+  elif [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+    echo -n "  [${action_index}] ${action_type}: \"$(echo "$action" | jq -r '.asset_group_name')\" ... "
   else
     echo -n "  [${action_index}] ${action_type}: \"${keyword}\" ... "
   fi
@@ -814,8 +1019,7 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       # Extension assets need two calls: create the asset, then link it to
       # the ad group. A failure between them leaves an orphan asset, so the
       # created asset id goes into the reversal record either way.
-      asset_type=$(echo "$action" | jq -r '.asset_type')
-      asset_body=$(echo "$action" | jq -c '
+      asset_type=$(echo "$action" | jq -r '.asset_type')      asset_body=$(echo "$action" | jq -c '
         . as $a
         | ($a.asset_type) as $t
         | {
@@ -852,6 +1056,26 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
           result=$(echo "$link_result" | jq --arg assetid "$created_asset_id" --arg assetrn "$created_asset_rn" \
             '. + {created_asset_id: $assetid, created_asset_rn: $assetrn}')
         fi
+      fi
+      ;;
+    UPDATE_ASSET_GROUP_ASSETS)
+      # One bulk request: every asset is created and linked in the same call,
+      # because a temporary resource name does not resolve across calls.
+      # Removals ride in the same request so the freed slot counts toward
+      # the limit check on the additions.
+      ag_id=$(echo "$action" | jq -r '.asset_group_id')
+      ag_additions=$(echo "$action" | jq -c '.asset_group_additions')
+      ag_removals=$(echo "$action" | jq -c '.asset_group_removals')
+
+      # Server-side dry run first: validateOnly checks the real slot limits
+      # and every duplicate rule against the live account without changing it.
+      # This is the gate — the local slot report is advisory only.
+      ag_validate=$(mutate_asset_group_bulk "$CUSTOMER_ID" "$ag_id" "$ag_additions" "$ag_removals" "true")
+      if [ "$(echo "$ag_validate" | jq -r '.success')" != "true" ]; then
+        echo -e "${RED}❌ server validation failed${NC}"
+        result="$ag_validate"
+      else
+        result=$(mutate_asset_group_bulk "$CUSTOMER_ID" "$ag_id" "$ag_additions" "$ag_removals" "false")
       fi
       ;;
   esac
@@ -901,6 +1125,12 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
           reversal_action="REMOVE_ADGROUP_ASSET"
           reversal_resource="$resource_name"
           ;;
+        UPDATE_ASSET_GROUP_ASSETS)
+          # Undo restores the asset group to the pre-change list: it unlinks
+          # what this action added and re-creates what it unlinked.
+          reversal_action="RESTORE_ASSET_GROUP_ASSETS"
+          reversal_resource=$(echo "$action" | jq -r '.asset_group_id')
+          ;;
       esac
 
       # For budgets, store before/after in reversal record; keep keyword/match fields stable for registry tooling.
@@ -912,12 +1142,25 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       # Asset actions keep the pre-change list in `snapshot` — that is what
       # undo restores. Other action types leave it null.
       asset_snapshot=$(echo "$action" | jq -c '.snapshot // null')
+      if [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+        asset_snapshot=$(echo "$action" | jq -c '.asset_group_snapshot')
+      fi
       created_asset_id=$(echo "$result" | jq -r '.created_asset_id // ""')
       created_asset_rn=$(echo "$result" | jq -r '.created_asset_rn // ""')
       if [ "$action_type" = "UPDATE_RSA_ASSETS" ] || [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
         keyword="-"
         match_type="N/A"
       fi
+      if [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+        keyword="-"
+        match_type="N/A"
+      fi
+
+      # What the asset-group action created and what it unlinked. Undo needs
+      # both: it removes the added links and re-creates the removed texts.
+      ag_added=$(echo "$action" | jq -c '[.asset_group_additions[]? | {field_type, text}]')
+      ag_removed=$(echo "$action" | jq -c '[.asset_group_removals[]? | {field_type, text}]')
+      ag_id=$(echo "$action" | jq -r '.asset_group_id // ""')
 
       reversal_record=$(jq -n \
         --arg id "$reversal_id" \
@@ -936,9 +1179,12 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
         --arg budgetResourceName "$budget_rn" \
         --arg createdAssetId "$created_asset_id" \
         --arg createdAssetRn "$created_asset_rn" \
+        --arg assetGroupId "$ag_id" \
         --argjson beforeMicros "${current_budget:-0}" \
         --argjson afterMicros "${proposed_budget:-0}" \
         --argjson assetSnapshot "$asset_snapshot" \
+        --argjson addedAssets "$ag_added" \
+        --argjson removedAssets "$ag_removed" \
         '{
           id: $id,
           action: $action,
@@ -960,6 +1206,9 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
           snapshot: $assetSnapshot,
           createdAssetId: (if $createdAssetId == "" then null else $createdAssetId end),
           createdAssetResourceName: (if $createdAssetRn == "" then null else $createdAssetRn end),
+          assetGroupId: (if $assetGroupId == "" then null else $assetGroupId end),
+          addedAssets: $addedAssets,
+          removedAssets: $removedAssets,
           status: "active",
           undoneAt: null
         }')
@@ -971,6 +1220,8 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
         log_action_result "$action_index" "$action_type" "${campaign_name}/${adgroup_name}" "$(echo "$action" | jq -r '.merged_headlines | length')H/$(echo "$action" | jq -r '.merged_descriptions | length')D" "✅ Applied" "$reversal_id" "$resource_name"
       elif [ "$action_type" = "CREATE_ADGROUP_ASSET" ]; then
         log_action_result "$action_index" "$action_type" "${campaign_name}/${adgroup_name}" "$(echo "$action" | jq -r '.asset_type')" "✅ Applied" "$reversal_id" "$resource_name"
+      elif [ "$action_type" = "UPDATE_ASSET_GROUP_ASSETS" ]; then
+        log_action_result "$action_index" "$action_type" "${campaign_name}/$(echo "$action" | jq -r '.asset_group_name')" "+$(echo "$ag_added" | jq 'length')/-$(echo "$ag_removed" | jq 'length')" "✅ Applied" "$reversal_id" "$ag_id"
       else
         log_action_result "$action_index" "$action_type" "$campaign_name" "\"$keyword\" [$match_type]" "✅ Applied" "$reversal_id" "$resource_name"
       fi
@@ -1046,6 +1297,15 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
       else
         verify_result=$(verify_adgroup_asset_exists "$CUSTOMER_ID" "$adgroup_name" "$created_asset_id")
       fi
+      ;;
+    UPDATE_ASSET_GROUP_ASSETS)
+      ag_expected=$(echo "$action" | jq -c '.asset_group_merged | {HEADLINE, LONG_HEADLINE, DESCRIPTION}')
+      ag_removed_texts=$(echo "$action" | jq -c '[.asset_group_removals[]?.text]')
+      verify_result=$(verify_asset_group_assets \
+        "$CUSTOMER_ID" \
+        "$(echo "$action" | jq -r '.asset_group_id')" \
+        "$ag_expected" \
+        "$ag_removed_texts")
       ;;
   esac
 

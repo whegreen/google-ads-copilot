@@ -472,5 +472,324 @@
       "description_count": 0,
       "final_urls": []
     }
+  },
+  {
+    "id": "asset-group-manifest-parses",
+    "type": "parser_fixture",
+    "fixture": "draft-asset-group-manifest.md",
+    "expected": {
+      "action_count": 1,
+      "first_type": "UPDATE_ASSET_GROUP_ASSETS",
+      "mode": "manifest"
+    }
+  },
+  {
+    "id": "asset-group-valid-action-passes",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "On-Demand Babysitter" }],
+        "asset_group_long_headlines": [{ "text": "Trusted sitter at your home today" }],
+        "asset_group_descriptions": [{ "text": "Book your on-demand sitter now" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": { "acknowledge_learning_period": true }
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "asset-group-must-name-the-asset-group",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "",
+        "asset_group_headlines": [{ "text": "On-Demand Babysitter" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "asset_group_not_explicit" }
+  },
+  {
+    "id": "asset-group-removal-requires-acknowledgement",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [],
+        "asset_group_remove_assets": [{ "text": "Book Your Babysitter", "field_type": "HEADLINE" }],
+        "asset_group_replace": false,
+        "guardrails": { "acknowledge_learning_period": false }
+      }
+    },
+    "expected": { "valid": false, "reason": "removal_not_acknowledged" }
+  },
+  {
+    "id": "asset-group-removal-field-type-must-be-known",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_remove_assets": [{ "text": "Book Your Babysitter", "field_type": "BANNER" }],
+        "asset_group_replace": false,
+        "guardrails": { "acknowledge_learning_period": true }
+      }
+    },
+    "expected": { "valid": false, "reason": "remove_field_type_invalid" }
+  },
+  {
+    "id": "asset-group-removing-and-adding-the-same-text-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "Book Your Babysitter" }],
+        "asset_group_remove_assets": [{ "text": "Book Your Babysitter", "field_type": "HEADLINE" }],
+        "asset_group_replace": false,
+        "guardrails": { "acknowledge_learning_period": true }
+      }
+    },
+    "expected": { "valid": false, "reason": "remove_and_add_same_text" }
+  },
+  {
+    "id": "asset-group-draft-with-no-changes-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "no_asset_changes" }
+  },
+  {
+    "id": "asset-group-duplicate-headline-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "Same Text" }, { "text": "Same Text" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "duplicate_asset_text" }
+  },
+  {
+    "id": "asset-group-duplicate-across-field-types-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "Shared Text" }],
+        "asset_group_long_headlines": [{ "text": "Shared Text" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "duplicate_asset_text" }
+  },
+  {
+    "id": "asset-group-empty-text-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "headline_empty" }
+  },
+  {
+    "id": "asset-group-headline-over-30-chars-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_headlines": [{ "text": "This headline is definitely longer than thirty characters" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "headline_too_long" }
+  },
+  {
+    "id": "asset-group-long-headline-over-90-chars-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_long_headlines": [{ "text": "This long headline is definitely longer than ninety characters in total length for sure indeed" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "long_headline_too_long" }
+  },
+  {
+    "id": "asset-group-description-over-90-chars-blocked",
+    "type": "asset_group_guardrail",
+    "input": {
+      "action": {
+        "type": "UPDATE_ASSET_GROUP_ASSETS",
+        "asset_group_name": "at home daycare feb",
+        "asset_group_descriptions": [{ "text": "This description is definitely longer than ninety characters in total length for sure indeed it is" }],
+        "asset_group_remove_assets": [],
+        "asset_group_replace": false,
+        "guardrails": {}
+      }
+    },
+    "expected": { "valid": false, "reason": "description_too_long" }
+  },
+  {
+    "id": "asset-group-merge-keeps-live-assets-and-adds-new",
+    "type": "asset_group_merge",
+    "input": {
+      "existing": {
+        "HEADLINE": [{ "text": "Daycare Services", "asset_id": "1", "resource_name": "rn1" }],
+        "LONG_HEADLINE": [{ "text": "Home Day Care", "asset_id": "2", "resource_name": "rn2" }],
+        "DESCRIPTION": [{ "text": "Book your sitter now", "asset_id": "3", "resource_name": "rn3" }]
+      },
+      "draft": {
+        "HEADLINE": [{ "text": "On-Demand Babysitter" }],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      },
+      "remove": [],
+      "replace": false
+    },
+    "expected": {
+      "headline_count": 2,
+      "long_headline_count": 1,
+      "description_count": 1,
+      "removed_texts": []
+    }
+  },
+  {
+    "id": "asset-group-merge-removes-only-the-named-asset",
+    "type": "asset_group_merge",
+    "input": {
+      "existing": {
+        "HEADLINE": [
+          { "text": "Daycare Services", "asset_id": "1", "resource_name": "rn1" },
+          { "text": "Book Your Babysitter", "asset_id": "2", "resource_name": "rn2" }
+        ],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      },
+      "draft": {
+        "HEADLINE": [{ "text": "On-Demand Babysitter" }],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      },
+      "remove": [{ "text": "Book Your Babysitter", "field_type": "HEADLINE" }],
+      "replace": false
+    },
+    "expected": {
+      "headline_count": 2,
+      "long_headline_count": 0,
+      "description_count": 0,
+      "removed_texts": ["Book Your Babysitter"]
+    }
+  },
+  {
+    "id": "asset-group-replace-makes-the-draft-the-final-list",
+    "type": "asset_group_merge",
+    "input": {
+      "existing": {
+        "HEADLINE": [
+          { "text": "Daycare Services", "asset_id": "1", "resource_name": "rn1" },
+          { "text": "Book Your Babysitter", "asset_id": "2", "resource_name": "rn2" }
+        ],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": [{ "text": "Book your sitter now", "asset_id": "3", "resource_name": "rn3" }]
+      },
+      "draft": {
+        "HEADLINE": [{ "text": "On-Demand Babysitter" }],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      },
+      "remove": [],
+      "replace": true
+    },
+    "expected": {
+      "headline_count": 1,
+      "long_headline_count": 0,
+      "description_count": 0,
+      "removed_texts": ["Book Your Babysitter", "Book your sitter now", "Daycare Services"]
+    }
+  },
+  {
+    "id": "asset-group-removal-of-an-asset-that-is-not-live-blocked",
+    "type": "asset_group_removal_check",
+    "input": {
+      "remove": [{ "text": "Never Linked", "field_type": "HEADLINE" }],
+      "existing": {
+        "HEADLINE": [{ "text": "Daycare Services", "asset_id": "1", "resource_name": "rn1" }],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      }
+    },
+    "expected": { "valid": false, "reason": "remove_asset_not_found" }
+  },
+  {
+    "id": "asset-group-removal-of-a-live-asset-passes",
+    "type": "asset_group_removal_check",
+    "input": {
+      "remove": [{ "text": "Daycare Services", "field_type": "HEADLINE" }],
+      "existing": {
+        "HEADLINE": [{ "text": "Daycare Services", "asset_id": "1", "resource_name": "rn1" }],
+        "LONG_HEADLINE": [],
+        "DESCRIPTION": []
+      }
+    },
+    "expected": { "valid": true, "reason": "" }
+  },
+  {
+    "id": "asset-group-slot-report-flags-the-published-cap",
+    "type": "asset_group_slots",
+    "input": {
+      "merged": {
+        "HEADLINE": [
+          { "text": "H1" }, { "text": "H2" }, { "text": "H3" }, { "text": "H4" },
+          { "text": "H5" }, { "text": "H6" }, { "text": "H7" }, { "text": "H8" }
+        ],
+        "LONG_HEADLINE": [{ "text": "L1" }],
+        "DESCRIPTION": [
+          { "text": "D1" }, { "text": "D2" }, { "text": "D3" },
+          { "text": "D4" }, { "text": "D5" }, { "text": "D6" }
+        ]
+      }
+    },
+    "expected": {
+      "headline_used": 8,
+      "headline_over": false,
+      "description_used": 6,
+      "description_over": true
+    }
   }
 ]

@@ -2,7 +2,7 @@
 """Asset group inventory + duplicate analysis for the live account.
 
 Read-only. Uses the same two-call pattern as
-scripts/apply-layer/lib/api-verify.sh:fetch_asset_group_text_assets.
+scripts/apply-layer/lib/api-verify.sh:fetch_asset_group_assets.
 """
 import json
 import urllib.parse

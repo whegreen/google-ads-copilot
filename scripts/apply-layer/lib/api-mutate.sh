@@ -786,3 +786,137 @@ mutate_enable_adgroup() {
     jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
   fi
 }
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Bulk update of a Performance Max asset group
+# ═══════════════════════════════════════════════════════════
+#   mutate_asset_group_bulk <customer_id> <asset_group_id> <assets_json> <remove_json> [validate_only]
+#
+# assets_json: [{"field_type":"HEADLINE","text":"..."}, ...]  — assets to create+link
+# remove_json: [{"field_type":"HEADLINE","resource_name":"customers/.../assetGroupAssets/..."}, ...]
+#
+# WHY ONE REQUEST: a Performance Max text asset's text is immutable, so adding an
+# asset means creating a NEW asset and linking it. Linking has to happen in the
+# same request as the creation, because a temporary resource name (assets/-1)
+# does not resolve across separate calls — the API answers "Resource was not
+# found".
+#
+# Removals ride in the same request on purpose: the API checks slot limits
+# against the asset group's links, so an asset that is being unlinked has to be
+# unlinked in the same request for the freed slot to count.
+mutate_asset_group_bulk() {
+  local customer_id="$1"
+  local asset_group_id="$2"
+  local assets_json="$3"
+  local remove_json="$4"
+  local validate_only="${5:-false}"
+
+  local asset_group_rn="customers/${customer_id}/assetGroups/${asset_group_id}"
+
+  # Temporary resource names must be unique inside one request AND must not
+  # repeat across requests (the API would treat them as the same asset).
+  # A per-call offset keeps them distinct.
+  local offset=$(( (RANDOM % 9000) + 1000 ))
+  local tmp_index=0
+  local tmp_id asset_rn item
+
+  local operations="[]"
+
+  # Removals first: freeing a slot has to be visible to the limit check that
+  # runs on the additions in this same request.
+  while IFS= read -r rn; do
+    [ -z "$rn" ] && continue
+    operations=$(echo "$operations" | jq -c --arg rn "$rn" \
+      '. + [{assetGroupAssetOperation:{remove:$rn}}]')
+  done < <(echo "$remove_json" | jq -r '.[]?.resource_name // empty' 2>/dev/null)
+
+  # Then create + link each new asset.
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    tmp_index=$((tmp_index + 1))
+    tmp_id="-$((offset + tmp_index))"
+    asset_rn="customers/${customer_id}/assets/${tmp_id}"
+    operations=$(echo "$operations" | jq -c \
+      --arg arn "$asset_rn" \
+      --arg agrn "$asset_group_rn" \
+      --argjson item "$item" \
+      '. + [
+        {assetOperation:{create:{resourceName:$arn, textAsset:{text:$item.text}}}},
+        {assetGroupAssetOperation:{create:{assetGroup:$agrn, asset:$arn, fieldType:$item.field_type}}}
+      ]')
+  done < <(echo "$assets_json" | jq -c '.[]? | select((.text // "") != "")' 2>/dev/null)
+
+  if [ "$(echo "$operations" | jq 'length')" -eq 0 ]; then
+    jq -n '{success: false, error: "No asset operations to perform"}'
+    return 1
+  fi
+
+  local payload
+  payload=$(jq -n --argjson ops "$operations" '{mutateOperations:$ops}')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/googleAds:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local count
+    count=$(echo "$result" | jq '(.mutateOperationResponses // []) | length' 2>/dev/null || echo 0)
+    if [ "$validate_only" = "true" ]; then
+      jq -n --argjson n "$count" '{success: true, validated: true, operations: $n}'
+    else
+      jq -n --argjson n "$count" '{success: true, operations: $n}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.. | objects | .message? // empty' 2>/dev/null | head -1)
+    [ -z "$error_msg" ] && error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# REVERSAL: Remove asset links from a Performance Max asset group
+# ═══════════════════════════════════════════════════════════
+#   mutate_asset_group_remove <customer_id> <resource_names_json>
+#
+# Uses the `remove` operation. An UPDATE with status=REMOVED is rejected by
+# the API ("Enum value 'REMOVED' cannot be used"); status=PAUSED is accepted
+# but keeps the slot occupied, so removal has to use `remove`.
+mutate_asset_group_remove() {
+  local customer_id="$1"
+  local resource_names_json="$2"
+
+  local operations="[]"
+  local rn
+  while IFS= read -r rn; do
+    [ -z "$rn" ] && continue
+    operations=$(echo "$operations" | jq -c --arg rn "$rn" \
+      '. + [{assetGroupAssetOperation:{remove:$rn}}]')
+  done < <(echo "$resource_names_json" | jq -r '.[]? // empty' 2>/dev/null)
+
+  if [ "$(echo "$operations" | jq 'length')" -eq 0 ]; then
+    jq -n '{success: true, removed: 0}'
+    return 0
+  fi
+
+  local payload
+  payload=$(jq -n --argjson ops "$operations" '{mutateOperations:$ops}')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/googleAds:mutate"
+
+  local result
+  if result=$(_gads_call "POST" "$url" "$payload" 2>&1); then
+    jq -n --argjson n "$(echo "$operations" | jq 'length')" '{success: true, removed: $n}'
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.. | objects | .message? // empty' 2>/dev/null | head -1)
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}

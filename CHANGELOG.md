@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — Apply Layer v5: Performance Max Asset Group Writes
+
+### Added
+- **`UPDATE_ASSET_GROUP_ASSETS` apply action** — add, replace or unlink text assets (headlines, long headlines, descriptions) in one Performance Max asset group. The focused account is PMax-only (zero ad groups), so without this action type every asset draft on it failed to resolve a target.
+- Apply Manifest schema **v0.4** (v0.3 and v0.2 stay valid) — adds `targets.asset_group_name`, `targets.long_headlines`, `targets.remove_assets` (`{text, field_type}`) and `targets.replace`.
+- `lib/api-verify.sh` — `fetch_asset_group_assets()` reads the live links of an asset group (text, asset id, link resource name) plus the per-field-type link totals; `verify_asset_group_assets()` checks that every expected text is live in its own field type and that every removed text is gone. It supersedes `fetch_asset_group_text_assets()`, which returned the texts but not the link resource names a removal needs.
+- `lib/api-mutate.sh` — `mutate_asset_group_bulk()` (one `googleAds:mutate` request carrying removals + create/link of every new asset) and `mutate_asset_group_remove()`.
+- `lib/asset-rules.sh` — `asset_group_validate_action()`, `asset_group_merge_lists()`, `asset_group_validate_removals()`, `asset_group_slot_report()`.
+- `gads-undo.sh` — `RESTORE_ASSET_GROUP_ASSETS`: unlinks what the action added and re-creates what it unlinked.
+- `scripts/apply-layer/preview-asset-group-apply.sh` — offline preview of the whole Performance Max flow (apply → verify → audit → undo) against a stubbed API with a simulated asset-group state.
+- `gads-apply.sh --validate-only` — runs the draft against the **live** account with `validateOnly` and changes nothing. This is the only gate that knows the account's real slot limits.
+- 17 eval cases (`evals/apply_cases.json`) and a shell-regression block covering the asset-group rules, the manifest parsing, the bulk payload and the offline apply/undo cycle.
+
+### Changed
+- **Slot limits are advisory locally.** The API's real ceiling for an asset group does not match the published caps and differs between asset groups of the same type — measured on account 9432618196: asset group 6677194808 accepted 16 headline links, 6654057973 accepted 15, 6677269312 rejected a 16th. A hard-coded local cap would either block a change the API accepts or allow one it rejects, so the local count is now a report and `validateOnly` is the fail-closed gate.
+- **Removal is explicit, per asset name.** A draft names the exact texts to unlink in `remove_assets`; the layer never picks an asset to drop on its own. A removal needs `acknowledge_learning_period: true`, and a name that is not live is an error (`remove_asset_not_found`) rather than a silent no-op.
+- The same text may not be removed and added in one draft (`remove_and_add_same_text`) — the asset group's text is immutable, so that combination is contradictory.
+
+### Corrected
+- The 2026-11-11 PMax asset-fill draft claimed the description slot had room for two more descriptions. It does not: the asset group carries 8 description link rows and the API rejects an added description with `RESOURCE_LIMIT`. The draft was revised — Changes 1 and 2 (7 headlines, 2 long headlines) are executable, Change 3 (descriptions) is marked not executable and Change 4 (removing English-description noise) stays blocked until per-asset performance labels exist.
+- The PMax slot table in that draft was wrong on two counts: descriptions are capped at 5 (not 4), and the previous version used the published caps as if they were the enforced ones.
+
 ## Unreleased — API v25 Migration + MegaMemory Dev-Token Sunset
 
 ### Changed

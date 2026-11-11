@@ -1,7 +1,7 @@
 # Apply Layer — CLI Scripts
 
 ## Status: LIVE — Write Access Confirmed
-API v20 confirmed working 2026-03-15 (v18 sunset/404, v19 unstable/500).
+API v25 confirmed working (v18–v21 sunset/404, v22 400).
 Full write cycle proven on a live account.
 
 ## Architecture
@@ -17,6 +17,11 @@ Budget actions require an `## Apply Manifest` JSON block (see `drafts/ACTION-MAN
 **v3 scope (assets):** Update RSA text assets (headlines/descriptions) and create extension assets (sitelink, callout, structured snippet).
 Also requires an `## Apply Manifest` JSON block (schema v0.3).
 
+**v5 scope (Performance Max):** Add, replace or unlink text assets inside a
+Performance Max asset group (`UPDATE_ASSET_GROUP_ASSETS`, manifest schema
+v0.4). This account is PMax-only — it has zero ad groups — so without this
+action type the apply layer could never resolve a target here.
+
 Asset writes are the first apply actions that change what customers actually
 see, so they carry extra guardrails:
 
@@ -31,6 +36,26 @@ see, so they carry extra guardrails:
   assets is *not* recoverable — the undo says so out loud.
 - **Blast-radius guard.** An asset action may only touch an ad group the draft
   names explicitly, and it needs its own `confirm assets` confirmation.
+
+### Performance Max asset groups specifically
+
+A Performance Max asset group is not an ad group, and its rules differ:
+
+- **Asset text is immutable.** Changing a headline means creating a NEW asset
+  and linking it. The old asset is unlinked, and with it its performance
+  history.
+- **One bulk request.** The API does not resolve a temporary resource name
+  (`assets/-1`) across separate calls, so every create+link pair and every
+  removal rides in ONE `googleAds:mutate` request.
+- **Removal is explicit.** A draft names the exact texts to unlink in
+  `remove_assets`. The layer never picks an asset to drop on its own, and a
+  removal needs `acknowledge_learning_period: true`.
+- **Slot limits are advisory locally.** The API's real ceiling for an asset
+  group does not match the published caps and differs between asset groups of
+  the same type (measured: 16 headline links accepted in one asset group, 15
+  in another). So the local count is a report, and the `validateOnly` request
+  is the gate — it fails closed.
+
 
 ### Flow
 
@@ -53,6 +78,7 @@ see, so they carry extra guardrails:
 | `gads-smoke-test.sh` | End-to-end write cycle test (`negative` or `budget` mode) |
 | `preview-asset-apply.sh` | Offline preview of the asset apply flow against a stubbed API |
 | `preview-asset-undo.sh` | Offline preview of undoing an asset change |
+| `preview-asset-group-apply.sh` | Offline preview of the Performance Max asset-group flow (apply + undo) against a stubbed API |
 | `lib/config.sh` | Shared config: API version, base URL, GAQL escaping helpers |
 | `lib/parse-draft.sh` | Extract structured actions from draft markdown (negatives + pauses + assets) |
 | `lib/asset-rules.sh` | Pure asset validation + merge rules (no API access) |
@@ -102,6 +128,13 @@ source data/google-ads-mcp.test.env.sh
 ./scripts/apply-layer/preview-asset-apply.sh workspace/ads/drafts/<your-asset-draft>.md
 ./scripts/apply-layer/preview-asset-undo.sh rev-001
 
+# Preview the Performance Max asset-group flow offline (apply + undo)
+./scripts/apply-layer/preview-asset-group-apply.sh workspace/ads/drafts/<your-pmax-draft>.md
+
+# Server-side validation against the LIVE account — validateOnly, no changes.
+# This is the only gate that knows the account's real slot limits.
+./scripts/apply-layer/gads-apply.sh --validate-only workspace/ads/drafts/<your-draft>.md
+
 # Apply a draft (full flow: parse → validate → dry-run → confirm → execute → verify → audit)
 ./scripts/apply-layer/gads-apply.sh workspace/ads/drafts/<your-draft>.md
 
@@ -130,11 +163,13 @@ Asset writes ask for their own confirmation phrase, separate from budgets:
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| v18 | ❌ 404 | Sunset — no longer accessible |
-| v19 | ❌ 500 | Unstable — server errors |
-| **v20** | ✅ 200 | **Current** — confirmed working 2026-03-15 |
+| v18–v21 | ❌ 404 | Sunset — no longer accessible |
+| v22 | ❌ 400 | Rejected |
+| **v25** | ✅ 200 | **Current** — confirmed working 2026-11-11 |
 
 The API version is centralized in `lib/config.sh`. To upgrade, change it once there.
+`scripts/check-v25-queries.py` runs every GAQL query in the repo against the
+live API, so field drift is caught before it breaks a workflow.
 
 ### Design Constraints
 
@@ -155,7 +190,7 @@ The repo intentionally excludes any real credential or test files. Only safe tem
 
 Create your own local copies before running live tests.
 
-### Supported Endpoints (v20)
+### Supported Endpoints (v25)
 
 | Endpoint | Operation | Status |
 |----------|-----------|--------|
@@ -167,5 +202,9 @@ Create your own local copies before running live tests.
 | `customers/{cid}/adGroupCriteria:mutate` | REMOVE (undo ad group negative) | ✅ Scaffolded |
 | `customers/{cid}/adGroups:mutate` | UPDATE status→PAUSED (pause ad group) | ✅ Scaffolded |
 | `customers/{cid}/adGroups:mutate` | UPDATE status→ENABLED (undo ad group pause) | ✅ Scaffolded |
+| `customers/{cid}/ads:mutate` | UPDATE RSA headlines/descriptions | ✅ Scaffolded |
+| `customers/{cid}/assets:mutate` | CREATE text / extension asset | ✅ Scaffolded |
+| `customers/{cid}/adGroupAssets:mutate` | CREATE + REMOVE asset link | ✅ Scaffolded |
+| `customers/{cid}/googleAds:mutate` | Bulk create + link + unlink (Performance Max asset group) | ✅ Validated |
 | `customers/{cid}/googleAds:searchStream` | GAQL queries (verify, lookup) | ✅ Tested |
 | `customers:listAccessibleCustomers` | Account discovery | ✅ Tested |

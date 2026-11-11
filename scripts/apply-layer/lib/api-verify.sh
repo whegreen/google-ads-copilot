@@ -550,57 +550,139 @@ lookup_asset_group() {
 # ═══════════════════════════════════════════════════════════
 # READ: Fetch the live text assets of a Performance Max asset group
 # ═══════════════════════════════════════════════════════════
-# Returns:
-#   { "HEADLINE": [{"text":"...","pinned_field":""}],
-#     "LONG_HEADLINE": [...],
-#     "DESCRIPTION": [...] }
+# fetch_asset_group_assets <customer_id> <asset_group_id>
 #
-# Two calls are needed: the asset_group_asset relation does not expand to the
-# asset's text when the asset group is filtered, so we take the asset resource
-# names first and then read the assets by id.
-fetch_asset_group_text_assets() {
+# Returns:
+#   {
+#     "HEADLINE":      [{text, asset_id, resource_name, status}],
+#     "LONG_HEADLINE": [...],
+#     "DESCRIPTION":   [...],
+#     "link_totals":   {HEADLINE: n, LONG_HEADLINE: n, DESCRIPTION: n}
+#   }
+#
+# The per-field-type lists hold ENABLED links only — those are the assets
+# actually serving. `link_totals` counts every link row for that field type
+# (ENABLED + REMOVED), because the API's own slot accounting sees the removed
+# rows too: an asset group that was trimmed earlier still carries those rows.
+#
+# `resource_name` is the LINK resource name
+# (customers/{cid}/assetGroupAssets/{agId}~{assetId}~{fieldType}) — that is
+# what a removal operation needs, not the asset resource name.
+#
+# Two GAQL calls are needed: the asset_group_asset relation does not expand to
+# the asset's text, so we take the asset resource names first and then read
+# the texts by id. GAQL has no JOIN.
+fetch_asset_group_assets() {
   local customer_id="$1"
   local asset_group_id="$2"
 
   local query="SELECT
+    asset_group_asset.resource_name,
     asset_group_asset.field_type,
     asset_group_asset.status,
     asset_group_asset.asset
   FROM asset_group_asset
-  WHERE asset_group.id = ${asset_group_id}
-    AND asset_group_asset.status = 'ENABLED'"
+  WHERE asset_group_asset.asset_group = 'customers/${customer_id}/assetGroups/${asset_group_id}'"
 
   local result
   result=$(_gaql_query "$customer_id" "$query")
 
+  # An API error arrives as a single object with an `error` key; searchStream
+  # answers with an array of pages. Guard against both.
+  if echo "$result" | jq -e 'type == "object" and has("error")' >/dev/null 2>&1; then
+    echo '{"HEADLINE":[],"LONG_HEADLINE":[],"DESCRIPTION":[],"link_totals":{"HEADLINE":0,"LONG_HEADLINE":0,"DESCRIPTION":0}}'
+    return 1
+  fi
+
   local ids
   ids=$(echo "$result" | jq -r '[.[].results[]?.assetGroupAsset.asset | split("/") | last] | unique | join(",")' 2>/dev/null)
 
-  if [ -z "$ids" ]; then
-    echo '{"HEADLINE":[],"LONG_HEADLINE":[],"DESCRIPTION":[]}'
-    return 0
+  local assets='[]'
+  if [ -n "$ids" ]; then
+    local asset_query
+    asset_query="SELECT asset.id, asset.text_asset.text FROM asset WHERE asset.id IN (${ids})"
+    assets=$(_gaql_query "$customer_id" "$asset_query")
   fi
 
-  local asset_query
-  asset_query="SELECT asset.id, asset.text_asset.text FROM asset WHERE asset.id IN (${ids})"
+  local asset_map
+  asset_map=$(echo "$assets" | jq -c '[.[].results[]?.asset | {id: (.id|tostring), text: (.textAsset.text // "")}]' 2>/dev/null)
 
-  local assets
-  assets=$(_gaql_query "$customer_id" "$asset_query")
-
-  # Join the two result sets by asset id.
-  echo "$result" | jq -c --argjson assets "$(echo "$assets" | jq -c '[.[].results[]?.asset | {id: (.id|tostring), text: (.textAsset.text // "")}]' 2>/dev/null)" '
+  echo "$result" | jq -c --argjson assets "$asset_map" '
     def byId($id): ($assets | map(select(.id == $id)) | first | .text);
+    def rows($ft): [ .[].results[]?.assetGroupAsset | select(.fieldType == $ft) ];
+    def enabled($ft): [ rows($ft)[] | select(.status == "ENABLED") | {
+        text: (byId((.asset | split("/") | last)) // ""),
+        asset_id: (.asset | split("/") | last),
+        resource_name: (.resourceName // ""),
+        status: (.status // "")
+      } ];
+    def total($ft): (rows($ft) | length);
     {
-      HEADLINE: [ .[].results[]?.assetGroupAsset
-        | select(.fieldType == "HEADLINE")
-        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ],
-      LONG_HEADLINE: [ .[].results[]?.assetGroupAsset
-        | select(.fieldType == "LONG_HEADLINE")
-        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ],
-      DESCRIPTION: [ .[].results[]?.assetGroupAsset
-        | select(.fieldType == "DESCRIPTION")
-        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ]
+      HEADLINE:      enabled("HEADLINE"),
+      LONG_HEADLINE: enabled("LONG_HEADLINE"),
+      DESCRIPTION:   enabled("DESCRIPTION"),
+      link_totals: {
+        HEADLINE:      total("HEADLINE"),
+        LONG_HEADLINE: total("LONG_HEADLINE"),
+        DESCRIPTION:   total("DESCRIPTION")
+      }
     }' 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════
+# VERIFY: The assets of a Performance Max asset group match the draft
+# ═══════════════════════════════════════════════════════════
+# verify_asset_group_assets <customer_id> <asset_group_id> <expected_json> <removed_texts_json>
+#
+# expected_json:   { "HEADLINE": [{text}], ... } — the merged list that should
+#                   be linked after the change
+# removed_texts_json: ["text", ...] — texts that must no longer be linked
+#
+# Every expected text must be live in the right field type, and every removed
+# text must be gone from the linked list.
+verify_asset_group_assets() {
+  local customer_id="$1"
+  local asset_group_id="$2"
+  local expected_json="$3"
+  local removed_texts_json="$4"
+
+  local live
+  live=$(fetch_asset_group_assets "$customer_id" "$asset_group_id")
+
+  # Check field by field: an expected text must be live in its own field type.
+  local missing=0 removed_still_live=0 ft exp_texts live_texts field_missing
+
+  for ft in HEADLINE LONG_HEADLINE DESCRIPTION; do
+    exp_texts=$(echo "$expected_json" | jq -c --arg ft "$ft" '(.[$ft] // []) | map(.text)' 2>/dev/null || echo '[]')
+    live_texts=$(echo "$live" | jq -c --arg ft "$ft" '(.[$ft] // []) | map(.text)' 2>/dev/null || echo '[]')
+    field_missing=$(jq -n --argjson e "$exp_texts" --argjson l "$live_texts" \
+      '[$e[] | select(. as $t | ($l | index($t)) == null)] | length')
+    missing=$((missing + field_missing))
+  done
+
+  if [ -n "$removed_texts_json" ] && [ "$removed_texts_json" != "null" ]; then
+    # Accept either a JSON array of texts or a single bare text.
+    case "$removed_texts_json" in
+      \[*) ;;
+      *) removed_texts_json=$(jq -n --arg t "$removed_texts_json" '[$t]') ;;
+    esac
+    local live_all still
+    live_all=$(echo "$live" | jq -c '[.HEADLINE[]?.text, .LONG_HEADLINE[]?.text, .DESCRIPTION[]?.text]')
+    still=$(jq -n --argjson r "$removed_texts_json" --argjson l "$live_all" \
+      '[$r[] | select(. as $t | ($l | index($t)) != null)] | length')
+    removed_still_live=$still
+  fi
+
+  if [ "$missing" -eq 0 ] && [ "$removed_still_live" -eq 0 ]; then
+    jq -n \
+      --argjson h "$(echo "$live" | jq '.HEADLINE | length')" \
+      --argjson l "$(echo "$live" | jq '.LONG_HEADLINE | length')" \
+      --argjson d "$(echo "$live" | jq '.DESCRIPTION | length')" \
+      '{verified: true, detail: ("Asset group live: " + ($h|tostring) + " headline(s), " + ($l|tostring) + " long headline(s), " + ($d|tostring) + " description(s)")}'
+  else
+    jq -n --argjson m "$missing" --argjson r "$removed_still_live" \
+      '{verified: false, detail: ("Asset group missing " + ($m|tostring) + " expected asset(s); " + ($r|tostring) + " removed asset(s) still linked")}'
+  fi
 }
 
 # ═══════════════════════════════════════════════════════════
