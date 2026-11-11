@@ -5,7 +5,10 @@
 
 export GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/to/data/google-ads-adc-authorized-user.json"
 export GOOGLE_CLOUD_PROJECT="your-google-cloud-project-id"
-export GOOGLE_ADS_DEVELOPER_TOKEN="your-google-ads-developer-token"
+
+# Legacy only — developer tokens were sunset 2026-09-09. API access is bound to
+# the Cloud project above. Leave unset unless you must reach a pre-v25 endpoint.
+# export GOOGLE_ADS_DEVELOPER_TOKEN=""
 
 # Optional: manager account ID for MCC access
 # export GOOGLE_ADS_LOGIN_CUSTOMER_ID="1234567890"

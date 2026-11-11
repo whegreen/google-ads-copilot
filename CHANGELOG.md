@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — API v25 Migration + MegaMemory Dev-Token Sunset
+
+### Changed
+- **API version v20 → v25.** v18–v21 now return 404 (sunset) and v22 returns 400; every read and write from this repo was failing.
+- **Developer token no longer required.** Tokens were sunset 2026-09-09 — API access is now bound to the Google Cloud project that owns the OAuth credentials. The `developer-token` header is only sent when `GADS_SEND_DEVELOPER_TOKEN=true`.
+- Field renames applied across all queries: `asset_group.final_url` → `final_urls`, `landing_page_view.final_url` → `unexpanded_final_url`, `asset.image_asset.full_size_image_url` → `full_size.url`, `ad_group_ad.id` → `resource_name`, `ad_group_asset.asset.id` → `asset`.
+- Resources removed from the API in v25 replaced: `asset_group_audience` → `audience`, `customer_negative_keyword` → `customer_negative_criterion`. `search_theme` was removed outright — PMax search themes are no longer readable.
+- `campaign_criterion.device.type` now filtered with `IN (...)` — `IS NOT NULL` is not valid on an enum field.
+- `conversion_action` can no longer be combined with `metrics.conversions` in one query (`PROHIBITED_METRIC_IN_SELECT_OR_WHERE_CLAUSE`); configuration and performance are now separate queries.
+
+### Added
+- **Performance Max asset group support** in the apply layer — this account is PMax-only and has zero ad groups, so the previous Search-RSA path could never resolve a target:
+  - `lookup_asset_group()` — resolve a PMax asset group by campaign + name (the asset group is where PMax final URLs live)
+  - `fetch_asset_group_text_assets()` — read live headlines / long headlines / descriptions of an asset group
+  - `mutate_create_text_asset()` + `mutate_link_asset_group_asset()` — create a text asset and link it into the asset group
+  - `mutate_set_asset_group_final_urls()` — change where the ad points
+- `scripts/check-v25-queries.py` — extracts every GAQL query in the repo and runs it against the live API, so field drift is caught before it breaks a workflow
+- `scripts/asset-group-inventory.py` — asset inventory + duplicate + language analysis for an asset group
+- `workspace/ads/assets.md` — live asset inventory with slot usage and duplicate check
+- `workspace/ads/goals.md` — business goals, catalogue, funnel map, guardrails, open questions
+
+### Fixed
+- `_gads_headers` emitted whole `-H "Name: value"` strings, so curl received them as one malformed argument instead of a header pair
+- A malformed asset draft could pass pre-flight validation
+- `verify_adgroup_asset_exists` now fails with a clear message instead of querying an empty asset id
+
+### Corrected
+- The 2026-11-10 PMax Structure Fix draft analysed **removed** asset groups, not the live one. Asset group 6677194808 has 18 text assets and **zero duplicates** — the problem is under-filled slots and copy that names only 2 of 7 catalogue services, not duplication. Superseded by `2026-11-11-temateyang-pmax-asset-fill.md`; the old draft is kept and marked superseded.
+
 ## Unreleased — Apply Layer v3: Ad Assets Without UI
 
 ### Added

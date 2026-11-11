@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # GADS_API_VERSION and GADS_API_BASE are already set
 
 # Run a GAQL query via searchStream
+# No developer-token header: tokens were sunset 2026-09-09 and the header is
+# ignored by the API servers. Access is granted by the Cloud project that owns
+# the OAuth credentials.
 _gaql_query() {
   local customer_id="$1"
   local query="$2"
@@ -29,12 +32,16 @@ _gaql_query() {
 
   local url="${GADS_API_BASE}/customers/${customer_id}/googleAds:searchStream"
 
-  curl -s -X POST "$url" \
-    -H "Authorization: Bearer ${access_token}" \
-    -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}" \
-    -H "Content-Type: application/json" \
-    ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:+-H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"} \
-    -d "$payload"
+  local -a headers=(-H "Authorization: Bearer ${access_token}" -H "Content-Type: application/json")
+  if [ "${GADS_SEND_DEVELOPER_TOKEN:-false}" = "true" ] && [ -n "${GOOGLE_ADS_DEVELOPER_TOKEN:-}" ]; then
+    headers+=(-H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}")
+  fi
+  if [ -n "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-}" ]; then
+    headers+=(-H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}")
+  fi
+  # Each array entry is a complete curl argument pair.
+
+  curl -s -X POST "$url" "${headers[@]}" -d "$payload"
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -400,7 +407,7 @@ lookup_rsa_ads_in_adgroup() {
   safe_adgroup=$(_gaql_escape "$adgroup_name")
 
   local query="SELECT
-    ad_group_ad.id,
+    ad_group_ad.resource_name,
     ad_group_ad.ad.id,
     ad_group_ad.ad.name,
     ad_group_ad.ad.type,
@@ -414,8 +421,12 @@ lookup_rsa_ads_in_adgroup() {
   local result
   result=$(_gaql_query "$customer_id" "$query")
 
+  # v25 removed ad_group_ad.id — the AdGroupAd id now only appears inside
+  # resource_name (customers/{cid}/adGroupAds/{ad_group_id}~{ad_id}), so pull
+  # it from there. The ad id is ad_group_ad.ad.id.
   echo "$result" | jq -c '[.[].results[]? | {
-    ad_group_ad_id: (.adGroupAd.id | tostring),
+    ad_group_ad_id: (.adGroupAd.resourceName | split("/") | last | split("~")[1] // ""),
+    ad_group_ad_resource_name: (.adGroupAd.resourceName // ""),
     ad_id: (.adGroupAd.ad.id | tostring),
     name: (.adGroupAd.ad.name // ""),
     type: (.adGroupAd.ad.type // "")
@@ -499,6 +510,100 @@ verify_rsa_assets() {
 }
 
 # ═══════════════════════════════════════════════════════════
+# LOOKUP: Resolve a Performance Max asset group by campaign + name
+# ═══════════════════════════════════════════════════════════
+# Returns:
+#   { "asset_group_id": "...", "name": "...", "final_urls": [...] }
+#
+# Performance Max campaigns have asset groups, not ad groups. The asset group
+# is what carries the final URLs, so it is the PMax equivalent of an ad group.
+lookup_asset_group() {
+  local customer_id="$1"
+  local campaign_name="$2"
+  local asset_group_name="$3"
+
+  local safe_campaign safe_ag
+  safe_campaign=$(_gaql_escape "$campaign_name")
+  safe_ag=$(_gaql_escape "$asset_group_name")
+
+  local query="SELECT
+    asset_group.id,
+    asset_group.name,
+    asset_group.status,
+    asset_group.final_urls
+  FROM asset_group
+  WHERE campaign.name = '${safe_campaign}'
+    AND asset_group.name = '${safe_ag}'
+    AND asset_group.status != 'REMOVED'"
+
+  local result
+  result=$(_gaql_query "$customer_id" "$query")
+
+  echo "$result" | jq -c '[.[].results[]? | {
+    asset_group_id: (.assetGroup.id | tostring),
+    name: (.assetGroup.name // ""),
+    status: (.assetGroup.status // ""),
+    final_urls: (.assetGroup.finalUrls // [])
+  }]' 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════
+# READ: Fetch the live text assets of a Performance Max asset group
+# ═══════════════════════════════════════════════════════════
+# Returns:
+#   { "HEADLINE": [{"text":"...","pinned_field":""}],
+#     "LONG_HEADLINE": [...],
+#     "DESCRIPTION": [...] }
+#
+# Two calls are needed: the asset_group_asset relation does not expand to the
+# asset's text when the asset group is filtered, so we take the asset resource
+# names first and then read the assets by id.
+fetch_asset_group_text_assets() {
+  local customer_id="$1"
+  local asset_group_id="$2"
+
+  local query="SELECT
+    asset_group_asset.field_type,
+    asset_group_asset.status,
+    asset_group_asset.asset
+  FROM asset_group_asset
+  WHERE asset_group.id = ${asset_group_id}
+    AND asset_group_asset.status = 'ENABLED'"
+
+  local result
+  result=$(_gaql_query "$customer_id" "$query")
+
+  local ids
+  ids=$(echo "$result" | jq -r '[.[].results[]?.assetGroupAsset.asset | split("/") | last] | unique | join(",")' 2>/dev/null)
+
+  if [ -z "$ids" ]; then
+    echo '{"HEADLINE":[],"LONG_HEADLINE":[],"DESCRIPTION":[]}'
+    return 0
+  fi
+
+  local asset_query
+  asset_query="SELECT asset.id, asset.text_asset.text FROM asset WHERE asset.id IN (${ids})"
+
+  local assets
+  assets=$(_gaql_query "$customer_id" "$asset_query")
+
+  # Join the two result sets by asset id.
+  echo "$result" | jq -c --argjson assets "$(echo "$assets" | jq -c '[.[].results[]?.asset | {id: (.id|tostring), text: (.textAsset.text // "")}]' 2>/dev/null)" '
+    def byId($id): ($assets | map(select(.id == $id)) | first | .text);
+    {
+      HEADLINE: [ .[].results[]?.assetGroupAsset
+        | select(.fieldType == "HEADLINE")
+        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ],
+      LONG_HEADLINE: [ .[].results[]?.assetGroupAsset
+        | select(.fieldType == "LONG_HEADLINE")
+        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ],
+      DESCRIPTION: [ .[].results[]?.assetGroupAsset
+        | select(.fieldType == "DESCRIPTION")
+        | {text: (byId((.asset | split("/") | last)) // ""), pinned_field: ""} ]
+    }' 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════
 # VERIFY: An extension asset is linked to the ad group
 # ═══════════════════════════════════════════════════════════
 verify_adgroup_asset_exists() {
@@ -509,8 +614,12 @@ verify_adgroup_asset_exists() {
   local safe_adgroup
   safe_adgroup=$(_gaql_escape "$adgroup_name")
 
-  local query="SELECT ad_group_asset.resource_name FROM ad_group_asset
-    WHERE ad_group.name = '${safe_adgroup}' AND ad_group_asset.asset.id = ${asset_id}"
+  # v25 removed ad_group_asset.asset.id — the linked asset id now only appears
+  # inside ad_group_asset.resource_name
+  # (customers/{cid}/adGroupAssets/{ad_group_id}~{asset_id}~{field_type}).
+  # ad_group.name must also be selected because it appears in the WHERE clause.
+  local query="SELECT ad_group.name, ad_group_asset.resource_name FROM ad_group_asset
+    WHERE ad_group.name = '${safe_adgroup}' AND ad_group_asset.asset = 'customers/${customer_id}/assets/${asset_id}'"
 
   local result
   result=$(_gaql_query "$customer_id" "$query")

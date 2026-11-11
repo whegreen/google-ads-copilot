@@ -5,9 +5,18 @@
 # Single source of truth for API version, base URL, and common settings.
 
 # Google Ads REST API version
-# Updated 2026-03-15: v18 sunset (404), v19 unstable (500), v20 confirmed working
-GADS_API_VERSION="v20"
+# Updated 2026-11-11: v18/v19/v20 sunset (404), v21 sunset (404), v22 rejects
+# requests (400). v25 confirmed working against the live production account.
+# Keep this on the newest version the account's Cloud project access allows.
+GADS_API_VERSION="v25"
 GADS_API_BASE="https://googleads.googleapis.com/${GADS_API_VERSION}"
+
+# Developer tokens were sunset 2026-09-09. API access levels are now bound to
+# the Google Cloud project that owns the OAuth credentials, and the
+# `developer-token` header is ignored by the API servers. We stop sending it
+# because a future major version will start rejecting it.
+# https://developers.google.com/google-ads/api/docs/api-policy/developer-token
+GADS_SEND_DEVELOPER_TOKEN="false"
 
 # Rate limiting
 GADS_MUTATION_DELAY_MS=500    # Delay between mutations (milliseconds)

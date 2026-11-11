@@ -44,10 +44,9 @@ fi
 
 echo -n "  GOOGLE_ADS_DEVELOPER_TOKEN:     "
 if [ -n "${GOOGLE_ADS_DEVELOPER_TOKEN:-}" ]; then
-  echo -e "${GREEN}✅ ${GOOGLE_ADS_DEVELOPER_TOKEN:0:8}...${NC}"
+  echo -e "${YELLOW}(set but not sent — tokens were sunset 2026-09-09)${NC}"
 else
-  echo -e "${RED}❌ Not set${NC}"
-  exit 1
+  echo -e "${GREEN}not needed (sunset 2026-09-09)${NC}"
 fi
 
 echo -n "  GOOGLE_ADS_LOGIN_CUSTOMER_ID:   "
@@ -105,8 +104,7 @@ echo -n "  Testing API access (list_accessible_customers)... "
 
 RESULT=$(curl -s -w "\n%{http_code}" \
   "${GADS_API_BASE}/customers:listAccessibleCustomers" \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}")
+  -H "Authorization: Bearer ${ACCESS_TOKEN}")
 
 HTTP_CODE=$(echo "$RESULT" | tail -1)
 BODY=$(echo "$RESULT" | sed '$d')

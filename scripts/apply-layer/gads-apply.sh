@@ -1038,10 +1038,14 @@ for i in $(seq 0 $((ACTION_COUNT - 1))); do
     CREATE_ADGROUP_ASSET)
       # The created asset id lives in the reversal record (the execute loop
       # is a separate scope).
-      created_asset_id=$(jq -r --arg d "$(basename "$DRAFT_FILE")" --arg aid "$action_index" \
+      created_asset_id=$(jq -r --arg d "$(basename "$DRAFT_FILE")" \
         '[.reversals[]? | select(.draftSource == $d and .status == "active" and .action == "CREATE_ADGROUP_ASSET")] | last | .createdAssetId // empty' \
         "$REVERSAL_REGISTRY_FILE" 2>/dev/null)
-      verify_result=$(verify_adgroup_asset_exists "$CUSTOMER_ID" "$adgroup_name" "$created_asset_id")
+      if [ -z "$created_asset_id" ]; then
+        verify_result='{"verified": false, "detail": "created asset id not recorded — cannot verify link"}'
+      else
+        verify_result=$(verify_adgroup_asset_exists "$CUSTOMER_ID" "$adgroup_name" "$created_asset_id")
+      fi
       ;;
   esac
 

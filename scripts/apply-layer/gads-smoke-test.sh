@@ -34,11 +34,15 @@ api_post() {
   local customer_id="$1"
   local endpoint="$2"
   local payload="$3"
+  local -a headers=(-H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json")
+  if [ "${GADS_SEND_DEVELOPER_TOKEN:-false}" = "true" ] && [ -n "${GOOGLE_ADS_DEVELOPER_TOKEN:-}" ]; then
+    headers+=(-H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}")
+  fi
+  if [ -n "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-}" ]; then
+    headers+=(-H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}")
+  fi
   curl -s -X POST "${GADS_API_BASE}/customers/${customer_id}/${endpoint}" \
-    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}" \
-    ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:+-H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"} \
-    -H "Content-Type: application/json" \
+    "${headers[@]}" \
     -d "$payload"
 }
 
@@ -92,8 +96,7 @@ find_campaign() {
 discover_accounts() {
   local accounts
   accounts=$(curl -s "${GADS_API_BASE}/customers:listAccessibleCustomers" \
-    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}" | jq -r '.resourceNames[]' 2>/dev/null)
+    -H "Authorization: Bearer ${ACCESS_TOKEN}" | jq -r '.resourceNames[]' 2>/dev/null)
 
   if [ -z "$accounts" ]; then
     echo -e "  ${RED}❌ No accessible accounts found${NC}"

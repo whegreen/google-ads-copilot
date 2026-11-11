@@ -88,10 +88,12 @@ if $SHOW_ALL; then
   fi
 
   # Check API config
+  # Developer tokens were sunset 2026-09-09 — access now comes from the Cloud
+  # project that owns the OAuth credentials, so a missing token is not a problem.
   if [ -n "${GOOGLE_ADS_DEVELOPER_TOKEN:-}" ]; then
-    echo -e "│  Dev Token: ${GREEN}Set${NC}"
+    echo -e "│  Dev Token: ${GREEN}Set${NC} ${DIM}(not sent — sunset 2026-09-09)${NC}"
   else
-    echo -e "│  Dev Token: ${RED}Missing${NC}"
+    echo -e "│  Dev Token: ${GREEN}Not needed${NC} ${DIM}(sunset 2026-09-09)${NC}"
   fi
 
   if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then

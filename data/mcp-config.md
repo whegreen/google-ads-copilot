@@ -81,8 +81,7 @@ Add to your MCP host configuration (e.g., `~/.gemini/settings.json`, Claude MCP 
       ],
       "env": {
         "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/credentials.json",
-        "GOOGLE_CLOUD_PROJECT": "your-project-id",
-        "GOOGLE_ADS_DEVELOPER_TOKEN": "your-developer-token"
+        "GOOGLE_CLOUD_PROJECT": "your-project-id"
       }
     }
   }

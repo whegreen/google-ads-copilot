@@ -66,7 +66,7 @@ see, so they carry extra guardrails:
 - `jq` — JSON processing
 - `curl` — API calls
 - OAuth2 credentials saved to a local file based on `data/google-ads-adc-authorized-user.template.json`
-- Developer token in env: `GOOGLE_ADS_DEVELOPER_TOKEN`
+- Developer token: **not required** — sunset 2026-09-09. API access is bound to the Google Cloud project that owns the OAuth credentials. Set `GADS_SEND_DEVELOPER_TOKEN=true` only if you must talk to a pre-v25 endpoint.
 - Account configured in `workspace/ads/account.md`
 
 ### Quick Start

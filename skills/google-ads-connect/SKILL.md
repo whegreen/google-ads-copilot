@@ -58,7 +58,8 @@ Switch to a different account. Updates workspace memory.
 |---------|-------------|-----|
 | MCP tool not found | Server not configured in MCP host | Add config — see `data/mcp-config.md` |
 | "No credentials found" | `GOOGLE_APPLICATION_CREDENTIALS` missing or wrong path | Check the env var points to a valid JSON file |
-| "Developer token not approved" | Token missing or pending | Check `GOOGLE_ADS_DEVELOPER_TOKEN` env var |
+| "Developer token not approved" | Legacy — tokens were sunset 2026-09-09 | Not a token problem. Check the Cloud project access level at https://console.cloud.google.com/google/ads-apis/overview |
+| "CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION" | Cloud project only has Test access | Apply for Explorer access on the Google Ads API Overview page |
 | "Project not found" | Wrong project ID | **Use `GOOGLE_CLOUD_PROJECT`** (not `GOOGLE_PROJECT_ID`) |
 | Connection timeout | pipx or network issue | Verify `pipx` is installed, internet is up |
 | "Manager account required" | MCC access needed | Add `GOOGLE_ADS_LOGIN_CUSTOMER_ID` |
@@ -69,7 +70,7 @@ Switch to a different account. Updates workspace memory.
 |----------|----------|---------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to OAuth/ADC credentials JSON |
 | `GOOGLE_CLOUD_PROJECT` | Yes | Google Cloud project ID (⚠️ NOT `GOOGLE_PROJECT_ID`) |
-| `GOOGLE_ADS_DEVELOPER_TOKEN` | Yes | Google Ads API developer token |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | No | Legacy only — developer tokens were sunset 2026-09-09; access is bound to the Cloud project owning the OAuth credentials |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | If MCC | Manager account customer ID (no dashes) |
 
 ⚠️ **Common gotcha:** The MCP server uses `GOOGLE_CLOUD_PROJECT`, not `GOOGLE_PROJECT_ID`. Earlier docs may reference the wrong name. `GOOGLE_CLOUD_PROJECT` is correct.

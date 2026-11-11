@@ -83,8 +83,7 @@ The `google-ads-mcp` server runs locally via `pipx`:
       ],
       "env": {
         "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/credentials.json",
-        "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID",
-        "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN"
+        "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID"
       }
     }
   }

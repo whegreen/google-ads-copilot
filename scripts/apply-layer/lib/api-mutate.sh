@@ -19,13 +19,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # GADS_API_VERSION and GADS_API_BASE are already set
 
 # Common headers for Google Ads API
+# The developer-token header is optional and ignored by the API servers since
+# the 2026-09-09 token sunset. Only send it when explicitly asked, because a
+# future major version will start rejecting it.
+# https://developers.google.com/google-ads/api/docs/api-policy/developer-token
 _gads_headers() {
   local access_token="$1"
-  echo -H "Authorization: Bearer ${access_token}"
-  echo -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}"
-  echo -H "Content-Type: application/json"
+  # Emits bare "Name: value" lines — the caller turns each into a curl -H
+  # argument. Emitting the whole "-H Name: value" string here would make it a
+  # single argv entry and curl would treat it as one malformed argument.
+  echo "Authorization: Bearer ${access_token}"
+  if [ "${GADS_SEND_DEVELOPER_TOKEN:-false}" = "true" ] && [ -n "${GOOGLE_ADS_DEVELOPER_TOKEN:-}" ]; then
+    echo "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}"
+  fi
+  echo "Content-Type: application/json"
   if [ -n "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-}" ]; then
-    echo -H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"
+    echo "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"
   fi
 }
 
@@ -37,12 +46,17 @@ _gads_call() {
   local access_token
   access_token=$(get_access_token)
 
+  # The header list has to be built before the curl call so the optional
+  # developer-token can be included or left out cleanly. Each entry becomes
+  # its own curl -H argument.
+  local -a headers=()
+  while IFS= read -r h; do
+    headers+=(-H "$h")
+  done < <(_gads_headers "$access_token")
+
   local response http_code
   response=$(curl -s -w "\n%{http_code}" -X "$method" "$url" \
-    -H "Authorization: Bearer ${access_token}" \
-    -H "developer-token: ${GOOGLE_ADS_DEVELOPER_TOKEN}" \
-    -H "Content-Type: application/json" \
-    ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:+-H "login-customer-id: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID}"} \
+    "${headers[@]}" \
     -d "$body")
 
   http_code=$(echo "$response" | tail -1)
@@ -404,6 +418,161 @@ mutate_update_rsa_assets() {
     local resource_name
     resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
     [ -z "$resource_name" ] && resource_name="$ad_rn"
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Create a text asset (Performance Max asset group)
+# ═══════════════════════════════════════════════════════════
+#   mutate_create_text_asset <customer_id> <text> [validate_only]
+#
+# A Performance Max asset group holds assets, not ad copies on an ad. Each
+# text asset is created first (assets:mutate) and then linked into the asset
+# group (mutate_link_asset_group_asset). Returns the new asset resource name.
+mutate_create_text_asset() {
+  local customer_id="$1"
+  local text="$2"
+  local validate_only="${3:-false}"
+
+  local payload
+  payload=$(jq -n \
+    --arg text "$text" \
+    '{
+      "operations": [{
+        "create": {
+          "textAsset": { "text": $text }
+        }
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/assets:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Link an asset into a Performance Max asset group
+# ═══════════════════════════════════════════════════════════
+#   mutate_link_asset_group_asset <customer_id> <asset_group_id> <asset_resource_name> <field_type> [validate_only]
+#
+# field_type is the AssetFieldType: HEADLINE | LONG_HEADLINE | DESCRIPTION.
+mutate_link_asset_group_asset() {
+  local customer_id="$1"
+  local asset_group_id="$2"
+  local asset_resource_name="$3"
+  local field_type="$4"
+  local validate_only="${5:-false}"
+
+  local payload
+  payload=$(jq -n \
+    --arg ag "customers/${customer_id}/assetGroups/${asset_group_id}" \
+    --arg asset "$asset_resource_name" \
+    --arg ft "$field_type" \
+    '{
+      "operations": [{
+        "create": {
+          "assetGroup": $ag,
+          "asset": $asset,
+          "fieldType": $ft
+        }
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/assetGroupAssets:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    if [ "$validate_only" = "true" ]; then
+      jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
+    else
+      jq -n --arg rn "$resource_name" '{success: true, resource_name: $rn}'
+    fi
+  else
+    local error_msg
+    error_msg=$(echo "$result" | jq -r '.error.message // "Unknown error"' 2>/dev/null || echo "API call failed")
+    [ -z "$error_msg" ] && error_msg="API call failed"
+    jq -n --arg msg "$error_msg" '{success: false, error: $msg}'
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# MUTATION: Update a Performance Max asset group's final URLs
+# ═══════════════════════════════════════════════════════════
+#   mutate_set_asset_group_final_urls <customer_id> <asset_group_id> <final_urls_json> [validate_only]
+#
+# This is where an ad's destination lives in Performance Max — the asset group
+# carries the final URLs, not the campaign and not the ad.
+mutate_set_asset_group_final_urls() {
+  local customer_id="$1"
+  local asset_group_id="$2"
+  local final_urls_json="$3"
+  local validate_only="${4:-false}"
+
+  local payload
+  payload=$(jq -n \
+    --arg rn "customers/${customer_id}/assetGroups/${asset_group_id}" \
+    --argjson urls "$final_urls_json" \
+    '{
+      "operations": [{
+        "updateMask": "final_urls",
+        "update": {
+          "resourceName": $rn,
+          "finalUrls": $urls
+        }
+      }]
+    }')
+
+  local url="${GADS_API_BASE}/customers/${customer_id}/assetGroups:mutate"
+
+  local result rc
+  if [ "$validate_only" = "true" ]; then
+    result=$(_gads_call_validate_only "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  else
+    result=$(_gads_call "POST" "$url" "$payload" 2>&1) && rc=0 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    local resource_name
+    resource_name=$(echo "$result" | jq -r '.results[0].resourceName // empty')
+    [ -z "$resource_name" ] && resource_name="customers/${customer_id}/assetGroups/${asset_group_id}"
     if [ "$validate_only" = "true" ]; then
       jq -n --arg rn "$resource_name" '{success: true, validated: true, resource_name: $rn}'
     else

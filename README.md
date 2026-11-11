@@ -160,7 +160,7 @@ structured refactor workflow: plan and lock scope first, then implement.
 |----------|----------|-------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to OAuth/ADC credentials JSON |
 | `GOOGLE_CLOUD_PROJECT` | Yes | Google Cloud project ID |
-| `GOOGLE_ADS_DEVELOPER_TOKEN` | Yes | Google Ads developer token |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | No | Legacy only — developer tokens were sunset 2026-09-09. Access is bound to the Cloud project that owns the OAuth credentials |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | If MCC | Manager account ID (no dashes) |
 
 ---
