@@ -35,11 +35,12 @@
 ### Added
 - **Performance Max asset group support** in the apply layer — this account is PMax-only and has zero ad groups, so the previous Search-RSA path could never resolve a target:
   - `lookup_asset_group()` — resolve a PMax asset group by campaign + name (the asset group is where PMax final URLs live)
-  - `fetch_asset_group_text_assets()` — read live headlines / long headlines / descriptions of an asset group
+  - `fetch_asset_group_text_assets()` — read live headlines / long headlines / descriptions of an asset group (removed in Apply Layer v5 below, superseded by `fetch_asset_group_assets()`)
   - `mutate_create_text_asset()` + `mutate_link_asset_group_asset()` — create a text asset and link it into the asset group
   - `mutate_set_asset_group_final_urls()` — change where the ad points
 - `scripts/check-v25-queries.py` — extracts every GAQL query in the repo and runs it against the live API, so field drift is caught before it breaks a workflow
 - `scripts/asset-group-inventory.py` — asset inventory + duplicate + language analysis for an asset group
+- `scripts/verify-asset-group-assets.py` — read-only confirmation of an asset group's live slot usage and contents (enabled counts, link rows incl. REMOVED, duplicates, texts); `--expected <file.json` diffs the live lists against a snapshot and exits 1 on mismatch. This is gate 6 of the apply-layer v5 plan.
 - `workspace/ads/assets.md` — live asset inventory with slot usage and duplicate check
 - `workspace/ads/goals.md` — business goals, catalogue, funnel map, guardrails, open questions
 
