@@ -68,7 +68,34 @@ fi
 # ponytail: guard leak — repo ini PUBLIK. knowledge.db ikut commit ke repo
 # publik, jadi pola data klien nyata / kredensial dari PUBLISH-CHECKLIST.md
 # harus diblokir sebelum db masuk history.
-LEAK=$(node "$MM_SQL" query .megamemory/knowledge.db "SELECT COUNT(*) FROM nodes WHERE summary LIKE '%GOCSPX-%' OR summary LIKE '%refresh_token%' OR summary LIKE '%client_secret%' OR name LIKE '%GOCSPX-%' OR why LIKE '%GOCSPX-%' OR file_refs LIKE '%GOCSPX-%' OR summary LIKE '%East Coast Container%' OR summary LIKE '%Cooper Recyc%' OR summary LIKE '%Allocco%' OR summary LIKE '%coopertank.com%' OR summary LIKE '%emerald-digital%';" 2>/dev/null | tr -d '[:space:]' || echo 0)
+#
+# PENTING: pola harus membedakan NAMA variabel dari NILAI secret. Knowledge
+# graph boleh sah menyebut "refresh_token" atau "client_secret" saat
+# mendokumentasikan setup — itu bukan kebocoran. Yang berbahaya adalah nilai
+# secret-nya, jadi polanya wajib menuntut panjang minimum + prefix khas nilai:
+#   GOCSPX- + 20 char  → Google OAuth client secret
+#   ya29.   + 20 char  → OAuth access token
+#   1//     + 24 char  → OAuth refresh token
+#   AIza    + 30 char  → Google API key
+# Nama klien nyata dari PUBLISH-CHECKLIST §2 tetap exact-match (tidak ambigu).
+LEAK_SQL="SELECT COUNT(*) FROM nodes WHERE
+  summary LIKE '%GOCSPX-____________________%'
+  OR summary LIKE '%ya29.____________________%'
+  OR summary LIKE '%1//________________________%'
+  OR summary LIKE '%AIza______________________________%'
+  OR why LIKE '%GOCSPX-____________________%'
+  OR why LIKE '%ya29.____________________%'
+  OR why LIKE '%1//________________________%'
+  OR why LIKE '%AIza______________________________%'
+  OR name LIKE '%GOCSPX-____________________%'
+  OR file_refs LIKE '%GOCSPX-____________________%'
+  OR summary LIKE '%East Coast Container%'
+  OR summary LIKE '%Cooper Recyc%'
+  OR summary LIKE '%Cooper Tank%'
+  OR summary LIKE '%Allocco%'
+  OR summary LIKE '%coopertank.com%'
+  OR summary LIKE '%emerald-digital%'"
+LEAK=$(node "$MM_SQL" query .megamemory/knowledge.db "$LEAK_SQL" 2>/dev/null | tr -d '[:space:]' || echo 0)
 [[ "$LEAK" == "" ]] && LEAK=0
 if [[ "$LEAK" -gt 0 ]] 2>/dev/null; then
   echo "pre-push: ✗ megamemory db memuat pola kredensial/data klien nyata — push DIBLOKIR" >&2
