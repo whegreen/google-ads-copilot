@@ -1,0 +1,29 @@
+# Optional dependencies — only for the scripts that use the official Google Ads
+# client library:
+#
+#   scripts/pmax_analysis.py       scripts/campaign_summary.py
+#   scripts/tracking_check.py      scripts/list_customers_direct.py
+#   scripts/landing_urls*.py
+#
+# Everything else in scripts/ talks to the v25 REST API with the standard
+# library only (urllib) and needs no installation at all:
+#
+#   scripts/verify-wa-click.py            scripts/asset-group-inventory.py
+#   scripts/verify-asset-group-assets.py  scripts/verify-asset-performance.py
+#   scripts/check-gtm-tags.py             scripts/verify-deploy-tracking.sh
+#
+# Setup (Python 3.11–3.13 — see the constraint below):
+#
+#   python3.11 -m venv .venv-gads
+#   .venv-gads/bin/pip install -r requirements-dev.txt
+#   .venv-gads/bin/python scripts/pmax_analysis.py
+#
+# Constraints that are not obvious:
+#   * Python <= 3.13. On 3.14+ the protobuf upb extension fails to build and
+#     the import dies with "Metaclasses with custom tp_new are not supported".
+#   * google-ads >= 35 ships the v23–v26 API modules, so the client can talk
+#     to the v25 endpoint this repo uses. Older releases (22.x) resolve to an
+#     older API version and pull in pkg_resources, which setuptools removed
+#     in v81.
+
+google-ads>=35

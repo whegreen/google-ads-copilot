@@ -28,6 +28,10 @@ client = GoogleAdsClient(
 CID = "9432618196"
 ga = client.get_service("GoogleAdsService")
 
+# Account currency is IDR (customer.currency_code). The old code printed a
+# "$" sign, which mislabelled every amount by ~16,000x.
+CURRENCY = "IDR"
+
 def run(label, query):
     print(f"\n{'='*60}\n{label}\n{'='*60}")
     try:
@@ -123,8 +127,8 @@ for r in rows:
     c = r.campaign
     m = r.metrics
     print(f"\n  [{c.status.name}] {c.name}")
-    print(f"    cost: ${m.cost_micros/1e6:.2f} | impressions: {m.impressions} | clicks: {m.clicks}")
-    cpa = f" | CPA: ${m.cost_per_conversion:.2f}" if m.cost_per_conversion and m.cost_per_conversion > 0 else ""
+    print(f"    cost: {CURRENCY} {m.cost_micros/1e6:.2f} | impressions: {m.impressions} | clicks: {m.clicks}")
+    cpa = f" | CPA: {CURRENCY} {m.cost_per_conversion:.2f}" if m.cost_per_conversion and m.cost_per_conversion > 0 else ""
     print(f"    conversions: {m.conversions} | all_conv: {m.all_conversions} | conv_value: {m.conversions_value}{cpa}")
 
 # 5. Conversion action configuration (all time)

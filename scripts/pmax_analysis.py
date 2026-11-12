@@ -28,6 +28,11 @@ client = GoogleAdsClient(
 CID = "9432618196"
 ga = client.get_service("GoogleAdsService")
 
+# Account currency is IDR (customer.currency_code). The old code printed a
+# "$" sign, which mislabelled every amount by ~16,000x — "Cost: $330643.68"
+# read as a third of a million dollars for a campaign that spent Rp 330.644.
+CURRENCY = "IDR"
+
 def run(label, query):
     print(f"\n{'='*60}\n{label}\n{'='*60}")
     try:
@@ -65,9 +70,9 @@ for r in rows:
     print(f"\n  [{c.status.name}] {c.name} (ID: {c.id})")
     print(f"    Bidding: {c.bidding_strategy_type.name}")
     print(f"    Impressions: {m.impressions} | Clicks: {m.clicks}")
-    print(f"    Cost: ${m.cost_micros/1e6:.2f} | Conversions: {m.conversions} | All Conv: {m.all_conversions}")
+    print(f"    Cost: {CURRENCY} {m.cost_micros/1e6:.2f} | Conversions: {m.conversions} | All Conv: {m.all_conversions}")
     if m.conversions > 0:
-        print(f"    Conv Value: ${m.conversions_value:.2f} | CPA: ${m.cost_micros/1e6/m.conversions:.2f}")
+        print(f"    Conv Value: {CURRENCY} {m.conversions_value:.2f} | CPA: {CURRENCY} {m.cost_micros/1e6/m.conversions:.2f}")
 
 # 2. Asset group performance
 rows = run("2. ASSET GROUP PERFORMANCE", """
@@ -89,7 +94,7 @@ for r in rows:
     m = r.metrics
     print(f"\n  Campaign: {c.name}")
     print(f"  Asset Group: [{ag.status.name}] {ag.name} (ID: {ag.id})")
-    print(f"    Impressions: {m.impressions} | Clicks: {m.clicks} | Cost: ${m.cost_micros/1e6:.2f} | Conv: {m.conversions}")
+    print(f"    Impressions: {m.impressions} | Clicks: {m.clicks} | Cost: {CURRENCY} {m.cost_micros/1e6:.2f} | Conv: {m.conversions}")
 
 # 3. Asset group assets
 rows = run("3. ASSET GROUP ASSETS", """
@@ -184,7 +189,7 @@ for r in rows:
     c = r.campaign
     m = r.metrics
     print(f"\n  [{c.status.name}] [{c.advertising_channel_type.name}] {c.name}")
-    print(f"    Impr: {m.impressions} | Clicks: {m.clicks} | Cost: ${m.cost_micros/1e6:.2f}")
+    print(f"    Impr: {m.impressions} | Clicks: {m.clicks} | Cost: {CURRENCY} {m.cost_micros/1e6:.2f}")
     print(f"    Conv: {m.conversions} | All Conv: {m.all_conversions}")
 
 # 8. Campaign criteria (corrected)

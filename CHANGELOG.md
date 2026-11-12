@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — Measurement gates: GTM publish check, per-asset performance, F2 scorecard
+
+### Added
+- **`scripts/check-gtm-tags.py`** — read-only publish gate for the GTM container. It fetches the compiled container (`gtm.js?id=GTM-KBFWRCMC`) and checks that the conversion id `AW-17023304515`, the WA Click label `BypDCOiCi7YdEMOGrLU_` and the trigger event `whatsapp_clicked` are actually served. The container file also contains GTM's own runtime (the strings "CustomEvent", "GoogleTag", "gclid" are built-in function names), so those are never used as markers. Baseline measured 2026-11-12: all three markers absent — the tags are not published yet. `--site` additionally checks the live page for the GTM snippet, the absence of `gtag('config'` beside it, and the dataLayer push in the active bundle; `--json` gives machine-readable output.
+- **`scripts/verify-asset-performance.py`** — per-asset Performance Max performance from `asset_group_asset` + metrics: impressions, clicks, CTR and serving period per asset, the live slot usage against the published caps, and near-duplicate detection between linked texts (word overlap ≥ 0.40). `--f2` prints the weekly scorecard for the measurement gate — `WA Click` conversions, the `WA Click rate` and the `Clicks to call` proxy the campaign currently optimises for — and applies the locked gate (≥10 WA Click conversions in the window, rate stable for ≥3 consecutive weeks).
+- **`scripts/verify-deploy-tracking.sh`** — post-deploy gate: the GTM snippet is present in the live page, no `gtag('config'` next to it, and the active bundle still contains `dataLayer.push` and `whatsapp_clicked`. A deploy that silently drops the dataLayer push looks fine in a browser and breaks every conversion measurement without an error.
+- **`requirements-dev.txt` + a README section** — the nine scripts that use the official Google Ads client library could not run at all: on Python 3.15 pip resolves `google-ads` to 22.0.0, which needs `pkg_resources` (removed in setuptools 81) and protobuf's upb extension does not build on 3.14+. With Python 3.11–3.13 and `google-ads>=35` (which ships the v23–v26 API modules, so the client can reach the v25 endpoint this repo uses) all nine run again.
+
+### Corrected
+- `scripts/pmax_analysis.py` and `scripts/tracking_check.py` printed every amount with a `$` sign although the account currency is IDR — "Cost: $330643.68" read as a third of a million dollars for a campaign that spent Rp 330.644. Amounts are now printed as `IDR <amount>`.
+- The slot cap reported by `verify-asset-performance.py` is the **published** cap, and the output says so: the enforced ceiling is higher and differs per asset group (this one accepted 16 headline links and 8 description links, and rejected the next description with `RESOURCE_LIMIT`). `validateOnly` stays the only authority — the same principle the apply layer already follows.
+
 ## Unreleased — Apply Layer v5: Performance Max Asset Group Writes
 
 ### Added

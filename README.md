@@ -124,6 +124,28 @@ Google Ads Copilot starts from search intent — what people typed, what they me
 
 The repo does not ship any real credentials or live test files. Only templates are committed.
 
+### Helper scripts
+
+Two families, no overlap:
+
+| Script | Needs |
+|---|---|
+| `scripts/verify-wa-click.py` | nothing — v25 REST API via urllib |
+| `scripts/verify-asset-group-assets.py` | nothing |
+| `scripts/asset-group-inventory.py` | nothing |
+| `scripts/verify-asset-performance.py` | nothing — per-asset PMax performance + the F2 scorecard |
+| `scripts/check-gtm-tags.py` | nothing — checks whether the GTM container publishes the conversion tags |
+| `scripts/verify-deploy-tracking.sh` | nothing — post-deploy gate for snippet + dataLayer |
+| `scripts/pmax_analysis.py`, `tracking_check.py`, `campaign_summary.py`, `landing_urls*.py`, `list_customers_direct.py` | the Google Ads client library — see [requirements-dev.txt](requirements-dev.txt) |
+
+The client-library family needs Python 3.11–3.13 (protobuf's upb extension does not build on 3.14+):
+
+```bash
+python3.11 -m venv .venv-gads
+.venv-gads/bin/pip install -r requirements-dev.txt
+.venv-gads/bin/python scripts/pmax_analysis.py
+```
+
 ### Install from a Release Bundle
 You can install from the repo as usual, or from a packaged bundle:
 
