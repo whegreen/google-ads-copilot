@@ -120,7 +120,7 @@ case "$URL" in
       respond '[{"results":[{"adGroupAd":{"resourceName":"customers/1234567890/adGroupAds/444~555","ad":{"id":"555","name":"RSA #1","type":"RESPONSIVE_SEARCH_AD"},"status":"ENABLED"}}]}]' 200
     elif [[ "$BODY" == *"FROM asset_group "* ]] || [[ "$BODY" == *"asset_group.id"* ]]; then
       # Performance Max asset group lookup.
-      respond '[{"results":[{"assetGroup":{"id":"6677194808","name":"at home daycare feb","status":"ENABLED","finalUrls":["https://kisahtumb.org/flexy-member"]}}]}]' 200
+      respond '[{"results":[{"assetGroup":{"id":"6677194808","name":"at home daycare feb","status":"ENABLED","finalUrls":["https://kisahtumbuh.org/flexy-member"]}}]}]' 200
     elif [[ "$BODY" == *"FROM ad_group "* ]] || [[ "$BODY" == *"ad_group.id"* ]]; then
       respond '[{"results":[{"adGroup":{"id":"444","name":"Crane Rental"}}]}]' 200
     elif [[ "$BODY" == *"FROM campaign "* ]]; then

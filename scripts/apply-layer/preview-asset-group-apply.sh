@@ -107,7 +107,7 @@ case "$URL" in
       respond "$(python3 "$STATE/assets.py")" 200
     elif [[ "$BODY" == *"FROM asset_group"* ]]; then
       name="$(gaql_value 'asset_group\.name')"
-      respond "[{\"results\":[{\"assetGroup\":{\"id\":\"6677194808\",\"name\":\"${name}\",\"status\":\"ENABLED\",\"finalUrls\":[\"https://kisahtubra.org/flexy-member\"]}}]}]" 200
+      respond "[{\"results\":[{\"assetGroup\":{\"id\":\"6677194808\",\"name\":\"${name}\",\"status\":\"ENABLED\",\"finalUrls\":[\"https://kisahtumbuh.org/flexy-member\"]}}]}]" 200
     elif [[ "$BODY" == *"FROM campaign"* ]]; then
       name="$(gaql_value 'campaign\.name')"
       respond "[{\"results\":[{\"campaign\":{\"id\":\"333\",\"name\":\"${name}\"}}]}]" 200
