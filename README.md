@@ -136,6 +136,9 @@ Two families, no overlap:
 | `scripts/verify-asset-performance.py` | nothing — per-asset PMax performance + the F2 scorecard |
 | `scripts/check-gtm-tags.py` | nothing — checks whether the GTM container publishes the conversion tags |
 | `scripts/verify-deploy-tracking.sh` | nothing — post-deploy gate for snippet + dataLayer |
+| `scripts/measurement-status.sh` | nothing — one command for the whole measurement period |
+| `scripts/check-gtm-scope.py` | nothing — which OAuth scopes a client advertises |
+| `scripts/gtm-publish.py` | a refresh token with the GTM scopes — see [requirements-dev.txt](requirements-dev.txt) |
 | `scripts/pmax_analysis.py`, `tracking_check.py`, `campaign_summary.py`, `landing_urls*.py`, `list_customers_direct.py` | the Google Ads client library — see [requirements-dev.txt](requirements-dev.txt) |
 
 The client-library family needs Python 3.11–3.13 (protobuf's upb extension does not build on 3.14+):
@@ -144,6 +147,32 @@ The client-library family needs Python 3.11–3.13 (protobuf's upb extension doe
 python3.11 -m venv .venv-gads
 .venv-gads/bin/pip install -r requirements-dev.txt
 .venv-gads/bin/python scripts/pmax_analysis.py
+```
+
+### Publishing the GTM conversion tags
+
+The GTM tags are the only part of the conversion path that is not code. They
+need OAuth scopes the Tag Manager API checks separately from the Ads API, and
+the scope names are the modern per-resource ones:
+
+| Scope | Grants |
+|---|---|
+| `tagmanager.manage.accounts` | `accounts.list`, `accounts.get` |
+| `tagmanager.readonly` | read containers |
+| `tagmanager.edit.containers` | create tags and triggers |
+| `tagmanager.edit.containerversions` | create a container version |
+| `tagmanager.publish` | publish it |
+
+Only scopes the OAuth client advertises may be requested — one unknown scope
+invalidates the whole authorization request, and an existing refresh token
+never gains a scope on its own. Check what the client accepts first:
+
+```bash
+python3 scripts/check-gtm-scope.py --all     # no login needed
+python3 scripts/oauth-login.py               # fresh consent
+python3 scripts/gtm-publish.py --use-adc     # dry run: creates, previews, stops
+python3 scripts/gtm-publish.py --use-adc --publish
+python3 scripts/check-gtm-tags.py            # marker check on the published container
 ```
 
 ### Install from a Release Bundle
