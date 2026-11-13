@@ -142,6 +142,12 @@ def main():
     )
     p.add_argument("--client-secret", help="secret of that OAuth client, if it is a confidential client")
     p.add_argument("--container", default=DEFAULT_CONTAINER)
+    p.add_argument(
+        "--delete-tag",
+        action="append",
+        default=[],
+        help="tag id to delete from the workspace before publishing (repeatable)",
+    )
     p.add_argument("--publish", action="store_true", help="actually publish the version")
     args = p.parse_args()
 
@@ -254,6 +260,31 @@ def main():
     existing = api("GET", f"{ws_path}/tags").get("tag", [])
     by_name = {t.get("name"): t for t in existing}
 
+    # ── cleanup ──
+    # A Conversion Linker is a singleton: two of them run the gclid cookie
+    # logic twice, and the one without parameters runs the template with no
+    # configuration at all (it shows up in the compiled container as a bare
+    # `__gclidw` block with no vtp_ keys). Keep the one with the most
+    # parameters, drop the rest.
+    linkers = [t for t in existing if t.get("type") == "gclidw"]
+    if len(linkers) > 1:
+        linkers.sort(key=lambda t: (-len(t.get("parameter", [])), int(t.get("tagId", 0))))
+        for extra in linkers[1:]:
+            api("DELETE", f"{ws_path}/tags/{extra['tagId']}")
+            print(
+                f"   removed duplicate Conversion Linker (tagId {extra['tagId']}, "
+                f"{len(extra.get('parameter', []))} params)"
+            )
+        existing = api("GET", f"{ws_path}/tags").get("tag", [])
+        by_name = {t.get("name"): t for t in existing}
+
+    for tid in args.delete_tag:
+        try:
+            api("DELETE", f"{ws_path}/tags/{tid}")
+            print(f"   deleted tag {tid} (requested)")
+        except RuntimeError as e:
+            print(f"   could not delete tag {tid}: {str(e)[:120]}")
+
     def ensure_tag(name, tag_type, trigger_id, params):
         """Create the tag if it is not there yet.
 
@@ -284,10 +315,14 @@ def main():
         return tag
 
     linker = ensure_tag(
-        "Conversion Linker",
+        "Conversion Linker - ads kistum",
         "gclidw",
         all_pages["triggerId"],
-        {},
+        {
+            "enableCrossDomain": "false",
+            "enableUrlPassthrough": "true",
+            "enableCookieOverrides": "false",
+        },
     )
     conversion = ensure_tag(
         "WA Click — Google Ads",
@@ -321,6 +356,20 @@ def main():
     print(f"   conversion id in compiled output : {ok_id}")
     print(f"   conversion label in compiled output: {ok_label}")
     print(f"   trigger event in compiled output : {ok_event}")
+    # A Conversion Linker is a singleton: two of them run the gclid cookie
+    # logic twice, and the one without parameters runs the template with no
+    # configuration at all. The preview answers with a container version, so
+    # count the tag types in it.
+    cv = preview.get("containerVersion", {})
+    types = [t.get("type") for t in cv.get("tag", [])]
+    n_linker = types.count("gclidw")
+    n_awct = types.count("awct")
+    n_dest = types.count("dest_aw")
+    print(f"   tags in preview: {len(types)} → gclidw={n_linker} awct={n_awct} dest_aw={n_dest}")
+    if n_linker != 1:
+        print(f"   ⚠️  expected exactly 1 Conversion Linker, found {n_linker}")
+    if n_awct != 1:
+        print(f"   ⚠️  expected exactly 1 Google Ads conversion tag, found {n_awct}")
     if not (ok_id and ok_label):
         print("   ⚠️  the compiled preview does not carry the conversion id/label —")
         print("      the template parameters were not accepted. Not publishing.")

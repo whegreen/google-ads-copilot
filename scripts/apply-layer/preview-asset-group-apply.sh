@@ -288,6 +288,11 @@ assets = [
     {"id": "5002", "resource_name": "customers/1234567890/assets/5002", "text": "Child Day Care"},
     {"id": "5003", "resource_name": "customers/1234567890/assets/5003", "text": "Home Day Care"},
     {"id": "5004", "resource_name": "customers/1234567890/assets/5004", "text": "Peace of mind childcare. Book your trusted sitter now."},
+    # The three descriptions the E1 prune draft removes (live texts, 265-day
+    # window: 40 impressions, 0 clicks, 0 conversions between them).
+    {"id": "5005", "resource_name": "customers/1234567890/assets/5005", "text": "Quality childcare, on your schedule. Book your sitter today!"},
+    {"id": "5006", "resource_name": "customers/1234567890/assets/5006", "text": "Stress-free childcare. Book your trusted sitter now."},
+    {"id": "5007", "resource_name": "customers/1234567890/assets/5007", "text": "Kurikulum Kisah Tumbuh fokus kemandirian & regulasi emosi"},
 ]
 links = [
     {
@@ -311,6 +316,24 @@ links = [
     {
         "resource_name": "customers/1234567890/assetGroupAssets/6677194808~5004~DESCRIPTION",
         "asset": "customers/1234567890/assets/5004",
+        "field_type": "DESCRIPTION",
+        "status": "ENABLED",
+    },
+    {
+        "resource_name": "customers/1234567890/assetGroupAssets/6677194808~5005~DESCRIPTION",
+        "asset": "customers/1234567890/assets/5005",
+        "field_type": "DESCRIPTION",
+        "status": "ENABLED",
+    },
+    {
+        "resource_name": "customers/1234567890/assetGroupAssets/6677194808~5006~DESCRIPTION",
+        "asset": "customers/1234567890/assets/5006",
+        "field_type": "DESCRIPTION",
+        "status": "ENABLED",
+    },
+    {
+        "resource_name": "customers/1234567890/assetGroupAssets/6677194808~5007~DESCRIPTION",
+        "asset": "customers/1234567890/assets/5007",
         "field_type": "DESCRIPTION",
         "status": "ENABLED",
     },
